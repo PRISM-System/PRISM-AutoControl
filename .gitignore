@@ -12,3 +12,8 @@ venv/
 # IDE / editor settings
 .vscode/
 .idea/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
