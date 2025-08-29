@@ -6,7 +6,7 @@ import requests, json
 BASE = "http://127.0.0.1:8014"  # 필요시 http://localhost:8014 로 바꾸세요
 
 # 1) NL → JSON
-nl = "CMP 센서의 MOTOR_CURRENT가 너무 높은 상황이야. HEAD_ROTATION을 조정하여 MOTOR_CURRENT를 1구간 내에 13.0까지 줄여야 해."
+nl = "CMP 센서의 MOTOR_CURRENT가 너무 높은 상황이야. HEAD_ROTATION을 조정하여 MOTOR_CURRENT를 14구간 내에 15.6까지 줄여야 해. HEAD_ROTATION은 최대 2까지만 증감 가능해."
 r1 = requests.post(f"{BASE}/api/v1/autocontrol/nl/parse", json={"query": nl})
 r1.raise_for_status()
 spec = r1.json()["data"]
