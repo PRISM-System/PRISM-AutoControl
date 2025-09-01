@@ -1,16 +1,26 @@
 from __future__ import annotations
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 import pathlib
 import numpy as np
 import pandas as pd
 
 from utils import predict_expected_y as fallback_predict_expected_y
 
+try:
+    from joblib import dump as _joblib_dump, load as _joblib_load
+    _HAS_JOBLIB = True
+except Exception:
+    _HAS_JOBLIB = False
+
+try:
+    import sklearn  
+    from sklearn.base import ClassifierMixin, RegressorMixin 
+    _HAS_SKLEARN = True
+except Exception:
+    _HAS_SKLEARN = False
+
 LINEAR_KIND = "linear_simple_v1"
 
-# -------------------------------
-# 학습(OLS, 전행 사용, 전처리 최소)
-# -------------------------------
 def train_simple_linear(
     feature_df: pd.DataFrame,
     target_col: str,
@@ -25,25 +35,21 @@ def train_simple_linear(
     X = feature_df[x_cols].to_numpy(dtype=float, copy=True)
     y = feature_df[target_col].to_numpy(dtype=float, copy=True)
 
-    # 간단 방어: NaN/Inf → 0
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
     y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # 편향항 추가: [X | 1]
     ones = np.ones((X.shape[0], 1), dtype=float)
     Xb = np.hstack([X, ones])
-
-    # OLS: w_full = (Xb^T Xb)^(-1) Xb^T y  (pinv로 안정화)
     w_full = np.linalg.pinv(Xb) @ y
-    w = w_full[:-1]           # 가중치
-    b = float(w_full[-1])     # bias
+    w = w_full[:-1]
+    b = float(w_full[-1])
 
     model = {
         "kind": LINEAR_KIND,
         "target_col": target_col,
         "feature_names": x_cols,
-        "weights": w.astype(float),    # shape (d,)
-        "bias": b                      # scalar
+        "weights": w.astype(float),
+        "bias": b
     }
     return model
 
@@ -74,9 +80,6 @@ def load_linear_model(path: pathlib.Path) -> Dict[str, Any]:
         }
     return model
 
-# -------------------------------
-# 예측 함수: expected_y_fn(last_y, delta_y, adjustments, horizon, feature_df=..., target_col=...)
-# -------------------------------
 def make_expected_y_fn_from_linear(model: Dict[str, Any]):
     x_cols: List[str] = model["feature_names"]
     w: np.ndarray = model["weights"]
@@ -91,16 +94,12 @@ def make_expected_y_fn_from_linear(model: Dict[str, Any]):
         feature_df: Optional[pd.DataFrame] = None,
         target_col: Optional[str] = None
     ) -> float:
-        # feature_df 없으면 폴백
         if feature_df is None:
             return float(fallback_predict_expected_y(last_y, delta_y, adjustments, horizon))
-
-        # 마지막 행을 baseline으로, adjustments 적용
         try:
             base_row = feature_df.tail(1)[x_cols].iloc[0].to_dict()
         except Exception:
             return float(fallback_predict_expected_y(last_y, delta_y, adjustments, horizon))
-
         x_vec = np.array(
             [float(base_row.get(c, 0.0) + adjustments.get(c, 0.0)) for c in x_cols],
             dtype=float
@@ -110,9 +109,6 @@ def make_expected_y_fn_from_linear(model: Dict[str, Any]):
 
     return expected_y_fn
 
-# -------------------------------
-# 고수준 API (학습 후 저장)
-# -------------------------------
 def train_and_save_linear_simple(
     feature_df: pd.DataFrame,
     target_col: str,
@@ -127,9 +123,148 @@ def train_and_save_linear_simple(
     path = save_dir / f"{filename_stub}.npz"
     return save_linear_model(model, path)
 
-# -------------------------------
-# 로더(가중치 경로가 선형모델이면 → 선형, 아니면 폴백)
-# -------------------------------
+_SKLEARN_REGISTRY = {
+    # 회귀
+    "linear_regression": ("sklearn.linear_model", "LinearRegression", "regression"),
+    "ridge": ("sklearn.linear_model", "Ridge", "regression"),
+    "lasso": ("sklearn.linear_model", "Lasso", "regression"),
+    "random_forest_regressor": ("sklearn.ensemble", "RandomForestRegressor", "regression"),
+    "gradient_boosting_regressor": ("sklearn.ensemble", "GradientBoostingRegressor", "regression"),
+    "svr": ("sklearn.svm", "SVR", "regression"),
+    # 분류
+    "logistic_regression": ("sklearn.linear_model", "LogisticRegression", "classification"),
+    "random_forest_classifier": ("sklearn.ensemble", "RandomForestClassifier", "classification"),
+    "gradient_boosting_classifier": ("sklearn.ensemble", "GradientBoostingClassifier", "classification"),
+    "svc": ("sklearn.svm", "SVC", "classification"),
+}
+
+def _import_sklearn_estimator(module_name: str, cls_name: str):
+    import importlib
+    mod = importlib.import_module(module_name)
+    return getattr(mod, cls_name)
+
+def train_and_save_sklearn(
+    feature_df: pd.DataFrame,
+    target_col: str,
+    save_dir: pathlib.Path,
+    *,
+    x_cols: Optional[List[str]] = None,
+    model: Union[str, Dict[str, Any]] = "random_forest_regressor",
+    filename_stub: str = "sk_surr",
+) -> pathlib.Path:
+    if not (_HAS_SKLEARN and _HAS_JOBLIB):
+        raise RuntimeError("scikit-learn/joblib이 설치되어 있지 않습니다. (pip install scikit-learn joblib)")
+
+    if x_cols is None:
+        x_cols = [c for c in feature_df.columns if c != target_col]
+
+    X = feature_df[x_cols].to_numpy(dtype=float, copy=True)
+    y = feature_df[target_col].copy()
+
+    if isinstance(model, str):
+        if model not in _SKLEARN_REGISTRY:
+            raise ValueError(f"unknown sklearn model key: {model}")
+        mod_name, cls_name, problem_type = _SKLEARN_REGISTRY[model]
+        Est = _import_sklearn_estimator(mod_name, cls_name)
+        est = Est()
+        class_opt = None
+        model_name = model
+        params = {}
+    else:
+        name = model.get("name")
+        if name not in _SKLEARN_REGISTRY:
+            raise ValueError(f"unknown sklearn model key: {name}")
+        mod_name, cls_name, problem_type = _SKLEARN_REGISTRY[name]
+        Est = _import_sklearn_estimator(mod_name, cls_name)
+        params = model.get("params") or {}
+        est = Est(**params)
+        class_opt = model.get("class_opt")
+        model_name = name
+
+    est.fit(X, y)
+
+    meta = {
+        "kind": "sklearn",
+        "problem_type": problem_type,  # "regression" | "classification"
+        "target_col": target_col,
+        "feature_names": x_cols,
+        "model_name": model_name,
+        "params": params,
+    }
+    # 분류의 경우 클래스 정보/양성 클래스 결정
+    if hasattr(est, "classes_"):
+        classes = list(getattr(est, "classes_"))
+        meta["classes"] = classes
+        if class_opt is None:
+            # 이진 분류: classes_[1]을 양성으로 간주. 멀티는 최댓값 확률을 반환(=class_opt 미사용)
+            if len(classes) == 2:
+                class_opt = classes[1]
+        meta["class_opt"] = class_opt
+
+    save_dir = pathlib.Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    path = save_dir / f"{filename_stub}.joblib"
+
+    payload = {
+        "meta": meta,
+        "estimator": est,
+    }
+    _joblib_dump(payload, path)
+    return path.resolve()
+
+def _make_expected_y_fn_from_sklearn(payload: Dict[str, Any]):
+    est = payload["estimator"]
+    meta = payload["meta"]
+    x_cols: List[str] = meta["feature_names"]
+    problem_type: str = meta["problem_type"]
+    class_opt = meta.get("class_opt")
+
+    def expected_y_fn(
+        last_y: float,
+        delta_y: float,
+        adjustments: Dict[str, float],
+        horizon: int,
+        *,
+        feature_df: Optional[pd.DataFrame] = None,
+        target_col: Optional[str] = None
+    ) -> float:
+        if feature_df is None:
+            return float(fallback_predict_expected_y(last_y, delta_y, adjustments, horizon))
+        try:
+            base_row = feature_df.tail(1)[x_cols].iloc[0].to_dict()
+        except Exception:
+            return float(fallback_predict_expected_y(last_y, delta_y, adjustments, horizon))
+
+        x_vec = np.array(
+            [[float(base_row.get(c, 0.0) + adjustments.get(c, 0.0)) for c in x_cols]],
+            dtype=float
+        )
+
+        if problem_type == "regression":
+            y_hat = float(est.predict(x_vec).reshape(-1)[0])
+            return y_hat
+
+        if hasattr(est, "predict_proba"):
+            proba = est.predict_proba(x_vec)[0]
+            if class_opt is not None:
+                try:
+                    idx = list(est.classes_).index(class_opt)
+                    return float(proba[idx])
+                except Exception:
+                    pass
+            return float(np.max(proba))
+        # prob이 없을 때: decision_function -> 시그모이드 근사
+        if hasattr(est, "decision_function"):
+            score = float(est.decision_function(x_vec).reshape(-1)[0])
+            return float(1.0 / (1.0 + np.exp(-score)))
+        y_pred = est.predict(x_vec).reshape(-1)[0]
+        try:
+            return float(y_pred)
+        except Exception:
+            return 1.0 if str(y_pred) == str(class_opt) else 0.0
+
+    return expected_y_fn
+
 def load_surrogate(weight_local_path: Optional[str]):
     def fallback_fn(last_y, delta_y, adjustments, horizon, **kwargs) -> float:
         return float(fallback_predict_expected_y(last_y, delta_y, adjustments, horizon))
@@ -137,8 +272,22 @@ def load_surrogate(weight_local_path: Optional[str]):
     if not weight_local_path:
         return fallback_fn
 
-    try:
-        model = load_linear_model(pathlib.Path(weight_local_path))
-        return make_expected_y_fn_from_linear(model)
-    except Exception:
-        return fallback_fn
+    p = pathlib.Path(weight_local_path)
+    suffix = p.suffix.lower()
+
+    if suffix == ".npz":
+        try:
+            model = load_linear_model(p)
+            return make_expected_y_fn_from_linear(model)
+        except Exception:
+            return fallback_fn
+
+    if suffix in {".joblib", ".pkl"} and _HAS_JOBLIB:
+        try:
+            payload = _joblib_load(p)
+            if isinstance(payload, dict) and "estimator" in payload and "meta" in payload:
+                return _make_expected_y_fn_from_sklearn(payload)
+        except Exception:
+            pass
+
+    return fallback_fn

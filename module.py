@@ -2,10 +2,6 @@ from typing import Any, Dict, List
 import numpy as np
 
 def risk_module(feature_df, target_col: str, cand_dicts: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    후보마다 expected_y와 setpoint_hint 차이를 보고 간단 위험레벨 산출.
-    summary.volatility는 expected_y의 표준편차.
-    """
     by = []
     if not cand_dicts:
         return {"byCandidate": by, "summary": {"volatility": 0.0}}
@@ -20,9 +16,7 @@ def risk_module(feature_df, target_col: str, cand_dicts: List[Dict[str, Any]]) -
     return {"byCandidate": by, "summary": {"volatility": round(vol, 6)}}
 
 def explain_module(feature_df, target_col: str, cand_dicts: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    후보들의 adjustments 절댓값 합을 변수 중요도로 정규화.
-    """
+
     acc: Dict[str, float] = {}
     for c in cand_dicts:
         for k, v in (c.get("adjustments") or {}).items():

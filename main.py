@@ -1,331 +1,403 @@
-# main.py — PRISM AutoControl Agent (API-only, with train/surrogate options)
-import os, json, uuid, pathlib, logging
+# main.py — AutoControl API (prediction agent 연동 + surrogate/optimizer 확장)
+import os, json, uuid, pathlib, logging, base64
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, RedirectResponse, HTMLResponse
+from fastapi import FastAPI, HTTPException, Query, Body
+from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 
-# ===== 외부 모듈/스키마 =====
-from llm_io import LLMBridge
 from autocontrol.schema import (
-    AutoControlTargetSpec,
-    AutoControlSpec,
-    AutoControlRunRequest,
-    AutoControlRunResponse,
-    AutoControlRunResult,
-    ControlCandidate,
-    AC_NLRequest,
-    AC_NLParsedResponse,
-    NarrateRequest as AC_NarrateRequest,
-    NarrateResponse as AC_NarrateResponse,
-    NarrateData,
+    AutoControlRunRequest, AutoControlRunResponse,
+    AutoControlRunResult, ControlCandidate,
+    AC_NLRequest, AC_NLParsedResponse,
+    AutoControlSpec, NarrateRequest, NarrateResponse
 )
-
-# 공용 유틸
-from utils import (
-    now_iso, rid, ensure_dirs,
-    load_csv_and_features, ensure_target_in_features,
-    ingest_weights, save_result_csv, artifact_download_url,
-)
-
-# 최적화/서러게이트
+from utils import ensure_dirs, now_iso
 from optimizer import optimize_control
 from surrogate import load_surrogate, train_and_save_linear_simple
 
-from module import risk_module, explain_module
-# ──────────────────────────────────────────────────────────────────────
-# 환경/로깅/경로
-# ──────────────────────────────────────────────────────────────────────
-load_dotenv()
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://147.47.39.144:8001/v1")
-LLM_MODEL    = os.getenv("LLM_MODEL", "Qwen/Qwen3-14B")
-LLM_API_KEY  = os.getenv("LLM_API_KEY", "EMPTY")
-API_PORT     = int(os.getenv("PORT", "8014"))
+try:
+    from surrogate import train_and_save_sklearn 
+    HAS_SKLEARN_TRAIN = True
+except Exception:
+    HAS_SKLEARN_TRAIN = False
 
-BASE_DIR           = pathlib.Path(__file__).resolve().parent
-DATA_DIR_DEFAULT   = (BASE_DIR / "autocontrol" / "data" / "Industrial_DB_sample").resolve()
-DEFAULT_CSV        = (DATA_DIR_DEFAULT / "SEMI_CMP_SENSORS.csv").resolve()
-OUTPUTS_DIR        = (BASE_DIR / "outputs").resolve()
-AUTOCONTROL_DIR    = (OUTPUTS_DIR / "autocontrol").resolve()
-WEIGHTS_CACHE_DIR  = (OUTPUTS_DIR / "weights").resolve()
+from module import risk_module, explain_module
+from llm_io import LLMBridge
+
+import requests 
+
+load_dotenv()
+API_PORT = int(os.getenv("PORT", "8014"))
+
+BASE_DIR          = pathlib.Path(__file__).resolve().parent
+DATA_DIR_DEFAULT  = (BASE_DIR / "autocontrol" / "data" / "Industrial_DB_sample").resolve()
+DEFAULT_CSV       = (DATA_DIR_DEFAULT / "SEMI_CMP_SENSORS.csv").resolve()
+OUTPUTS_DIR       = (BASE_DIR / "outputs").resolve()
+AUTOCONTROL_DIR   = (OUTPUTS_DIR / "autocontrol").resolve()
+WEIGHTS_CACHE_DIR = (OUTPUTS_DIR / "weights").resolve()
 ensure_dirs([OUTPUTS_DIR, AUTOCONTROL_DIR, WEIGHTS_CACHE_DIR])
 
-llm = LLMBridge(base_url=LLM_BASE_URL, model=LLM_MODEL, api_key=LLM_API_KEY)
+def _safe_filename(prefix: str, ext: str) -> pathlib.Path:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    rid = uuid.uuid4().hex[:8]
+    return (WEIGHTS_CACHE_DIR / f"{prefix}_{ts}_{rid}{ext}").resolve()
 
-logger = logging.getLogger("autocontrol_agent")
-logger.setLevel(logging.INFO)
-_handler = logging.StreamHandler()
-_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s'))
-if not logger.handlers:
-    logger.addHandler(_handler)
+def _save_base64_to_file(b64: str, preferred_ext: str = ".npz") -> str:
+    raw = base64.b64decode(b64.encode("utf-8"))
+    ext = preferred_ext
+    head4 = raw[:4]
+    if head4 == b"\x80\x04\x95\x00":  
+        ext = ".pkl"
+    out = _safe_filename("weights_b64", ext)
+    with open(out, "wb") as f:
+        f.write(raw)
+    return str(out)
 
-def _notice(events: List[str], msg: str):
-    logger.info(msg)
-    events.append(f"[{now_iso()}] {msg}")
+def _looks_supported_weight(path: str) -> bool:
+    low = path.lower()
+    return low.endswith(".npz") or low.endswith(".joblib") or low.endswith(".pkl")
 
-# ─────────────────────────────────────────────────────────────────────-
-# FastAPI
-# ─────────────────────────────────────────────────────────────────────-
-app = FastAPI(title="PRISM AutoControl Agent (simple linear train)", version="1.4.0")
+app = FastAPI(
+    title="AutoControl API",
+    description="Surrogate + Optimizer",
+    version="1.0.0"
+)
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def root():
-    return RedirectResponse(url="/healthz")
+    return """<h3>AutoControl API</h3>
+    <p>POST <code>/api/v1/autocontrol/run-direct</code></p>
+    <p>POST <code>/api/v1/autocontrol/parse-nl</code> / <code>/api/v1/autocontrol/narrate</code></p>
+    """
 
-@app.get("/healthz")
-def healthz():
-    return {"status": "ok", "time": now_iso()}
-
-@app.get("/readyz")
-def readyz():
-    return {"ready": True, "llm_base_url": LLM_BASE_URL, "time": now_iso()}
-@app.get("/favicon.ico")
-def favicon():
-    return HTMLResponse(status_code=204, content="")
-# ─────────────────────────────────────────────────────────────────────-
-# NL → JSON (원한다면 llm_io._extract_json_from_text로 대체 가능)
-# ─────────────────────────────────────────────────────────────────────-
-@app.post("/api/v1/autocontrol/nl/parse", response_model=AC_NLParsedResponse)
-def ac_nl_parse(body: AC_NLRequest):
-    events: List[str] = []
-    _notice(events, f"[AC NL] query={body.query}")
+def fetch_agent_snapshot(
+    base_url: str,
+    task_id: str,
+    inline_base64: bool = True
+) -> Dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/api/v1/prediction/activate_autocontrol/{task_id}"
+    params = {"inline_base64": "true" if inline_base64 else "false"}
     try:
-        # 네 LLM 브리지가 오토컨트롤 전용 추출기가 없다면 _extract_json_from_text로 교체해도 됨
-        raw = llm._extract_autocontrol_spec(body.query)
+        r = requests.get(url, params=params, timeout=20)
+        if r.status_code != 200:
+            raise RuntimeError(f"agent responded {r.status_code}: {r.text[:200]}")
+        return r.json()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"NL→JSON 실패: {e}")
+        raise HTTPException(status_code=502, detail=f"agent snapshot fetch failed: {e}")
 
-    # CSV에서 feature 목록 확보(데모)
-    csv_file, df, feature_df, csv_features = load_csv_and_features(None, DEFAULT_CSV, numeric_only=True)
+def realize_weight_from_snapshot(snap: Dict[str, Any]) -> Optional[str]:
+    data = snap.get("data") or {}
+    b64 = data.get("weight_base64")
+    path = data.get("weight_path")
 
-    task_id   = raw.get("taskId") or f"ac_task_{uuid.uuid4().hex[:6]}"
-    ac_id     = raw.get("acID") or f"ac_{uuid.uuid4().hex[:6]}"
-    target_col = raw.get("target_col") or "MOTOR_CURRENT"
-    if target_col not in csv_features:
-        target_col = "MOTOR_CURRENT" if "MOTOR_CURRENT" in csv_features else csv_features[0]
+    if b64:
+        try:
+            save_path = _save_base64_to_file(b64)
+            return save_path if _looks_supported_weight(save_path) else None
+        except Exception:
+            pass
 
-    req_features = raw.get("feature_names")
-    if isinstance(req_features, list) and req_features:
-        feature_names = [f for f in req_features if f in csv_features] or [f for f in csv_features if f != target_col] or csv_features
+    if path and os.path.exists(path):
+        return path if _looks_supported_weight(path) else None
+
+    return None
+
+# ──────────────────────────────────────────────────────────────────────
+def _compose_short_answer_ko(target_col: str, setpoint: float, horizon: int, top: Dict[str, Any]) -> str:
+    adjs = top.get("adjustments") or {}
+    if adjs:
+        adj_txt = ", ".join(f"{k} {v:+.3f}" for k, v in adjs.items()) + " 로 조정하세요"
     else:
-        feature_names = [f for f in csv_features if f != target_col] or csv_features
-
-    control = AutoControlTargetSpec(
-        setpoint=float(raw.get("setpoint", 0.0)),
-        horizon =int(raw.get("horizon", 11))
+        adj_txt = "추가 조정 없이 현재 설정을 유지하세요"
+    ey = float(top.get("expected_y", 0.0))
+    sc = float(top.get("score", 0.0))
+    return (
+        f"{horizon} 스텝 후 '{target_col}'을(를) {setpoint:.3f}에 맞추려면 {adj_txt}. "
+        f"예상값 {ey:.3f}, 점수 {sc:.3f}."
     )
-
-    spec = AutoControlSpec(
-        taskId=task_id,
-        acID=ac_id,
-        feature_names=feature_names,
-        target_col=target_col,
-        control=control,
-        constraints=raw.get("constraints")
-    )
-    return {"code": "SUCCESS", "data": spec, "metadata": {"timestamp": now_iso(), "request_id": rid()}}
-
-# ─────────────────────────────────────────────────────────────────────-
-# Run Direct — 간단 학습/로딩/최적화
-# ─────────────────────────────────────────────────────────────────────-
 @app.post("/api/v1/autocontrol/run-direct", response_model=AutoControlRunResponse)
 def ac_run_direct(
-    body: AutoControlRunRequest,
-    # 데이터/모델 입력
-    csv_path: Optional[str] = Query(None, description="(옵션) CSV 경로 (미지정 시 기본 데모 CSV 사용)"),
-    weight_path: Optional[str]  = Query(None, description="(옵션) 로컬 weight 경로(.npz)"),
-    weight_url: Optional[str]   = Query(None, description="(옵션) weight 파일 URL(.npz)"),
-    weights_b64: Optional[str]  = Query(None, description="(옵션) base64 인코딩된 weight(.npz)"),
-    # 메타/선택
-    model_meta: Optional[str]   = Query(None, description="(옵션) 응답에 표기할 모델명 메타"),
-    surrogate: str              = Query("auto", description="서러게이트: auto | linear | fallback"),
-    train: bool                 = Query(False, description="가중치가 있어도 재학습 강제"),
-    train_if_missing: bool      = Query(True, description="가중치 없으면 새로 학습"),
+    body: AutoControlRunRequest = Body(...),
+    weight_path: Optional[str] = Query(None, description="로컬 weight 경로(.npz/.joblib/.pkl)"),
+    weight_url: Optional[str]  = Query(None, description="weight 파일 URL"),
+    weights_b64: Optional[str] = Query(None, description="Base64 인코딩된 weight"),
+
+    surrogate_model: str = Query(
+        "linear",
+        description="'linear' 또는 'sklearn:<registry_key>' (예: 'sklearn:random_forest_regressor')"
+    ),
+    surrogate_params: Optional[str] = Query(
+        None,
+        description="하이퍼파라미터(JSON 문자열). 예: '{\"n_estimators\":200}'"
+    ),
+    opt_method: str = Query(
+        "coordinate",
+        description="SciPy 기반 메서드 선택. 예 : coordinate | nelder-mead | powell | lbfgsb | tnc | slsqp | cobyla | trust-constr | de | anneal | auto"
+    ),
+    maxiter: Optional[int] = Query(None, description="SciPy 기반 메서드의 최대 반복 수"),
+    agent_base_url: Optional[str] = Query(
+        None, description="Prediction Agent 베이스 URL (예: http://localhost:8001)"
+    ),
+    agent_task_id: Optional[str] = Query(
+        None, description="Prediction Agent의 taskId"
+    ),
+    agent_inline: bool = Query(
+        True, description="base64 인라인 요청 여부"
+    ),
 ):
     events: List[str] = []
-    _notice(events, f"[AC] run-direct: taskId={body.taskId}, acID={body.acID}, target={body.target_col}, setpoint={body.control.setpoint}, horizon={body.control.horizon}")
 
-    # 1) CSV 로드
+    csv_path = body.control and getattr(body.control, "csv_path", None)
+    if not csv_path:
+        csv_path = str(DEFAULT_CSV)
+    if not pathlib.Path(csv_path).exists():
+        raise HTTPException(status_code=400, detail=f"CSV not found: {csv_path}")
+    feature_df = pd.read_csv(csv_path)
+
+    if body.target_col not in feature_df.columns:
+        raise HTTPException(status_code=400, detail=f"target_col '{body.target_col}' not in CSV columns")
+
+    feature_names = body.feature_names or [c for c in feature_df.columns if c != body.target_col]
+
     try:
-        csv_file, df, feature_df, csv_features = load_csv_and_features(csv_path, DEFAULT_CSV, numeric_only=True)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"[AC] CSV 로드 실패: {e}")
-    _notice(events, f"[AC] data loaded: rows={int(df.shape[0])}, cols={int(df.shape[1])}")
-
-    # 2) 타깃/피처 검증
-    try:
-        ensure_target_in_features(feature_df, body.target_col)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"[AC] 타깃 컬럼 검증 실패: {e}")
-    used_features = [f for f in body.feature_names if f in csv_features] or [f for f in csv_features if f != body.target_col]
-    _notice(events, f"[AC] features used: {used_features[:8]}{'...' if len(used_features)>8 else ''}")
-
-    # 3) 최근 상태 요약
-    series  = pd.to_numeric(feature_df[body.target_col], errors="coerce").dropna().to_numpy()
-    last_y  = float(series[-1]) if series.size >= 1 else 0.0
-    delta_y = float(series[-1] - series[-2]) if series.size >= 2 else 0.0
-
-    # 4) 가중치 인입(예측 에이전트 호환)
-    weight_meta = ingest_weights(
-        weight_path=weight_path,
-        weight_url=weight_url,
-        weights_b64=weights_b64,
-        pred_activation_base_url=None,  # 단순화: 필요 시 다시 연결
-        pred_task_id=None,
-        weights_cache_dir=WEIGHTS_CACHE_DIR,
-        events=events,
-    )
-    weight_local_path    = weight_meta.get("weight_local_path")
-    best_model_from_pred = weight_meta.get("best_model")
-
-    # 5) 서러게이트 결정: load vs train vs fallback (단순화)
-    chosen_model_name = model_meta or best_model_from_pred
-    expected_y_fn = None
-
-    def _train_linear_and_load():
-        nonlocal weight_local_path, chosen_model_name, expected_y_fn
-        x_cols = [c for c in used_features if c != body.target_col]
-        stub   = f"{body.taskId}_{body.acID}_linear_simple"
-        ckpt   = train_and_save_linear_simple(
-            feature_df, body.target_col,
-            save_dir=WEIGHTS_CACHE_DIR,
-            x_cols=x_cols,
-            filename_stub=stub
-        )
-        weight_local_path = str(ckpt)
-        chosen_model_name = chosen_model_name or "linear_simple_v1"
-        expected_y_fn = load_surrogate(weight_local_path)
-        _notice(events, f"[AC] linear(simple) trained & loaded: {pathlib.Path(ckpt).name}")
-
-    if surrogate == "fallback":
-        expected_y_fn = load_surrogate(None)
-        chosen_model_name = chosen_model_name or "fallback"
-        _notice(events, "[AC] using fallback surrogate")
-    elif surrogate == "linear":
-        if train or not weight_local_path:
-            _train_linear_and_load()
+        last_y = float(feature_df[body.target_col].iloc[-1])
+        if len(feature_df) >= 2:
+            prev_y = float(feature_df[body.target_col].iloc[-2])
+            delta_y = last_y - prev_y
         else:
-            expected_y_fn = load_surrogate(weight_local_path)
-            chosen_model_name = chosen_model_name or "linear_simple_v1"
-            _notice(events, f"[AC] linear(simple) loaded from weight: {pathlib.Path(weight_local_path).name}")
-    else:  # auto
-        if weight_local_path and not train:
-            expected_y_fn = load_surrogate(weight_local_path)
-            chosen_model_name = chosen_model_name or best_model_from_pred or "linear_simple_v1"
-            _notice(events, f"[AC] surrogate loaded from weight: {pathlib.Path(weight_local_path).name}")
-        elif train_if_missing or train:
-            _train_linear_and_load()
-        else:
-            expected_y_fn = load_surrogate(None)
-            chosen_model_name = chosen_model_name or "fallback"
-            _notice(events, "[AC] no weights; using fallback surrogate")
+            delta_y = 0.0
+    except Exception:
+        last_y, delta_y = 0.0, 0.0
 
-    # 6) 최적화 실행 (Top-K 후보)
-    actuator_candidates = [f for f in used_features if f != body.target_col]
-    cand_list = optimize_control(
-        variables=actuator_candidates,
-        last_y=last_y, delta_y=delta_y,
-        setpoint=body.control.setpoint, horizon=body.control.horizon,
-        constraints=body.constraints if isinstance(body.constraints, dict) else None,
-        top_k=1,
+    weight_local_path: Optional[str] = None
+
+    if weights_b64:
+        try:
+            weight_local_path = _save_base64_to_file(weights_b64)
+            events.append(f"[{now_iso()}] weights: received via base64 → {os.path.basename(weight_local_path)}")
+        except Exception as e:
+            events.append(f"[{now_iso()}] base64 decode failed: {e}")
+
+    if not weight_local_path and weight_url:
+        try:
+            r = requests.get(weight_url, timeout=20)
+            r.raise_for_status()
+            ext = ".npz"
+            low = weight_url.lower()
+            if low.endswith(".joblib"):
+                ext = ".joblib"
+            elif low.endswith(".pkl"):
+                ext = ".pkl"
+            out = _safe_filename("weights_url", ext)
+            with open(out, "wb") as f:
+                f.write(r.content)
+            weight_local_path = str(out)
+            events.append(f"[{now_iso()}] weights: downloaded from url → {os.path.basename(out)}")
+        except Exception as e:
+            events.append(f"[{now_iso()}] weight_url fetch failed: {e}")
+
+    if not weight_local_path and weight_path and os.path.exists(weight_path):
+        weight_local_path = weight_path
+        events.append(f"[{now_iso()}] weights: using local path → {os.path.basename(weight_path)}")
+
+    agent_snapshot = None
+    if not weight_local_path and agent_base_url and agent_task_id:
+        try:
+            agent_snapshot = fetch_agent_snapshot(agent_base_url, agent_task_id, inline_base64=agent_inline)
+            events.append(f"[{now_iso()}] fetched snapshot from prediction agent: taskId={agent_task_id}")
+            realized = realize_weight_from_snapshot(agent_snapshot)
+            if realized:
+                weight_local_path = realized
+                events.append(f"[{now_iso()}] weights: realized from agent snapshot → {os.path.basename(realized)}")
+            else:
+                events.append(f"[{now_iso()}] agent snapshot provided unsupported weight format; will train local surrogate")
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            events.append(f"[{now_iso()}] agent snapshot fetch error: {e}")
+
+    if not weight_local_path:
+        if surrogate_model.startswith("sklearn:"):
+            if not HAS_SKLEARN_TRAIN:
+                raise HTTPException(
+                    status_code=400,
+                    detail="surrogate.py가 scikit-learn 학습을 지원하지 않습니다. (확장판으로 교체 필요)"
+                )
+            sk_key = surrogate_model.split(":", 1)[1].strip()
+            params = {}
+            if surrogate_params:
+                try:
+                    params = json.loads(surrogate_params)
+                except Exception as e:
+                    events.append(f"[{now_iso()}] surrogate_params JSON parse failed: {e}")
+            ckpt = train_and_save_sklearn(   # type: ignore
+                feature_df=feature_df,
+                target_col=body.target_col,
+                save_dir=WEIGHTS_CACHE_DIR,
+                x_cols=feature_names,
+                model={"name": sk_key, "params": params},
+                filename_stub=f"{body.acID or uuid.uuid4().hex[:6]}_{sk_key}"
+            )
+            weight_local_path = str(ckpt)
+            events.append(f"[{now_iso()}] trained sklearn surrogate: {sk_key} → {os.path.basename(weight_local_path)}")
+        else:
+            ckpt = train_and_save_linear_simple(
+                feature_df=feature_df,
+                target_col=body.target_col,
+                save_dir=WEIGHTS_CACHE_DIR,
+                x_cols=feature_names,
+                filename_stub=f"{body.acID or uuid.uuid4().hex[:6]}_linear"
+            )
+            weight_local_path = str(ckpt)
+            events.append(f"[{now_iso()}] trained linear surrogate → {os.path.basename(weight_local_path)}")
+
+    expected_y_fn = load_surrogate(weight_local_path)
+
+    setpoint = float(body.control.setpoint)
+    horizon  = int(body.control.horizon)
+    ranked = optimize_control(
+        variables=feature_names,
+        last_y=last_y,
+        delta_y=delta_y,
+        setpoint=setpoint,
+        horizon=horizon,
+        constraints=body.constraints,
+        top_k=5,
         expected_y_fn=expected_y_fn,
-        feature_df=feature_df, target_col=body.target_col,
-        restarts=12, iters_per_restart=80,
+        feature_df=feature_df,
+        target_col=body.target_col,
+        method=opt_method,
+        maxiter=maxiter
     )
 
-    cand_dicts = []
-    for c in cand_list:
-        c["setpoint_hint"] = float(body.control.setpoint)
-        cand_dicts.append(c)
+    for r in ranked:
+        r["setpoint_hint"] = setpoint
+    risk = risk_module(feature_df, body.target_col, ranked)
+    explain = explain_module(feature_df, body.target_col, ranked)
 
-    # 7) 위험/설명
-    risk = risk_module(feature_df, body.target_col, cand_dicts)
-    if not isinstance(risk, dict):
-        risk = {"byCandidate": risk}
-    explanation = explain_module(feature_df, body.target_col, cand_dicts)
+    task_id = body.taskId
+    ac_id   = body.acID
+    out_name = f"ac_{task_id}_{ac_id}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
+    out_csv  = (AUTOCONTROL_DIR / out_name).resolve()
+    rows = []
+    adj_cols = sorted({k for r in ranked for k in (r.get("adjustments") or {}).keys()})
+    for r in ranked:
+        base = {"id": r["id"], "expected_y": r["expected_y"], "score": r["score"]}
+        for c in adj_cols:
+            base[c] = (r["adjustments"] or {}).get(c, 0.0)
+        rows.append(base)
+    pd.DataFrame(rows).to_csv(out_csv, index=False)
+    if ranked:
+        nl_answer = _compose_short_answer_ko(body.target_col, setpoint, horizon, ranked[0])
+    else:
+        nl_answer = "추천 조정안을 찾지 못했습니다."
 
-    # 8) 결과 CSV 저장 + 다운로드 URL
-    out_rows = []
-    for c in cand_list:
-        row = {"candidate_id": c["id"], "expected_y": c["expected_y"], "score": c["score"]}
-        for k, v in c["adjustments"].items():
-            row[f"adj_{k}"] = v
-        out_rows.append(row)
-    try:
-        result_csv_path   = save_result_csv(out_rows, AUTOCONTROL_DIR, body.taskId, body.acID)
-        result_filename   = result_csv_path.name
-        result_csv_public = artifact_download_url(result_filename)
-        _notice(events, f"[AC] result CSV saved: {result_filename}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"[AC] 결과 CSV 저장 실패: {e}")
+    events.append(f"[{now_iso()}] NL_ANSWER: {nl_answer}")
 
-    # 9) 응답
+    ans_path = out_csv.with_suffix(".txt")
+    with open(ans_path, "w", encoding="utf-8") as f:
+        f.write(nl_answer + "\n")
+    events.append(f"[{now_iso()}] natural-language answer saved → {ans_path.name}")
+    events.append(f"[{now_iso()}] optimized with method={opt_method}, maxiter={maxiter}")
+    events.append(f"[{now_iso()}] result csv saved → {out_csv.name}")
+
+    selected_idx = 0 if ranked else -1
+    candidates: List[ControlCandidate] = [
+        ControlCandidate(**{
+            "id": r["id"],
+            "adjustments": r["adjustments"],
+            "expected_y": float(r["expected_y"]),
+            "score": float(r["score"]),
+        }) for r in ranked
+    ]
+
     data = AutoControlRunResult(
-        taskId=body.taskId,
-        acID=body.acID,
-        input_csv_path=str(csv_file),
-        result_csv_path=result_csv_public,
-        feature_names=used_features,
+        taskId=task_id,
+        acID=ac_id,
+        input_csv_path=str(csv_path),
+        result_csv_path=str(out_csv),
+        feature_names=feature_names,
         target_col=body.target_col,
-        modelSelected=chosen_model_name,
-        weight_path=weight_local_path or weight_meta.get("weight_remote_hint"),
-        control=AutoControlTargetSpec(setpoint=body.control.setpoint, horizon=body.control.horizon),
-        candidates=[ControlCandidate(**{k: v for k, v in c.items() if k in {"id","adjustments","expected_y","score"}}) for c in cand_list],
-        selected_candidate_idx=0,
+        modelSelected=surrogate_model,
+        weight_path=weight_local_path,
+        control=body.control,
+        candidates=candidates,
+        selected_candidate_idx=selected_idx,
         risk=risk,
-        explanation=explanation,
+        explanation=explain,
         events=events
     )
+    nl_answer = _compose_short_answer_ko(body.target_col, setpoint, horizon, ranked[0]) if ranked else "추천 후보를 찾지 못했습니다."
+    events.append(f"[{now_iso()}] natural-language answer composed")
+    meta = {
+        "timestamp": now_iso(),
+        "surrogate_model": surrogate_model,
+        "opt_method": opt_method,
+        "maxiter": str(maxiter),
+    }
+    narration = None
+    try:
+        bridge = LLMBridge()
+        
+        narration = bridge._narrate({
+            "query": body.model_dump(), 
+            "results": [c.model_dump() for c in candidates],  
+            "risk": risk,
+            "explain": explain,
+        })
+    except Exception as e:
+        narration = f"[자동 설명 실패] {e}"
+
     return AutoControlRunResponse(
         code="SUCCESS",
         data=data,
-        metadata={"timestamp": now_iso(), "request_id": rid()}
+        metadata={**meta, "narration": narration, "nl_answer": nl_answer}  # narration 추가
     )
 
-# ─────────────────────────────────────────────────────────────────────-
-# Narrate / Artifact
-# ─────────────────────────────────────────────────────────────────────-
-@app.post("/api/v1/autocontrol/narrate", response_model=AC_NarrateResponse)
-def ac_narrate(body: AC_NarrateRequest):
+@app.post("/api/v1/autocontrol/parse-nl", response_model=AC_NLParsedResponse)
+def parse_nl(req: AC_NLRequest = Body(...)):
+    bridge = LLMBridge()
+    spec_dict = bridge._extract_autocontrol_spec(req.query)
+    spec_dict.setdefault("feature_names", [])
+    spec_dict.setdefault("constraints", None)
+    ctrl = {
+        "setpoint": float(spec_dict.get("setpoint")),
+        "horizon": int(spec_dict.get("horizon", 11)),
+    }
+    ac_spec = AutoControlSpec(
+        taskId=spec_dict.get("taskId"),
+        acID=spec_dict.get("acID"),
+        feature_names=spec_dict.get("feature_names"),
+        target_col=spec_dict.get("target_col"),
+        control=ctrl,
+        constraints=spec_dict.get("constraints"),
+    )
+    return AC_NLParsedResponse(
+        code="SUCCESS",
+        data=ac_spec,
+        metadata={"parsedBy": "LLMBridge._extract_autocontrol_spec"}
+    )
+
+@app.post("/api/v1/autocontrol/narrate", response_model=NarrateResponse)
+def narrate(req: NarrateRequest = Body(...)):
+    bridge = LLMBridge()
     try:
-        payload = dict(body.payload)
-        if isinstance(payload.get("data"), dict):
-            d = payload["data"]
-            if isinstance(d.get("candidates"), list) and len(d["candidates"]) > 50:
-                d["candidates"] = d["candidates"][:10] + [{"note": f"... {len(d['candidates'])-10} more candidates truncated"}]
-        text = llm._narrate(payload)
-        return AC_NarrateResponse(
+        narration = bridge._narrate(req.payload)
+        return NarrateResponse(
             code="SUCCESS",
-            data=NarrateData(narration=text, events=[f"[{now_iso()}] AC Narration OK"]),
-            metadata={"timestamp": now_iso(), "request_id": rid()}
+            data={"narration": narration, "events": [f"[{now_iso()}] generated by LLMBridge"], "error": None},
+            metadata={"model": bridge.model, "base_url": bridge.base_url}
         )
     except Exception as e:
-        return AC_NarrateResponse(
+        return NarrateResponse(
             code="ERROR",
-            data=NarrateData(
-                narration=llm._fallback_ko(body.payload),
-                events=[f"[{now_iso()}] AC Narration failed: {e}"],
-                error=str(e)
-            ),
-            metadata={"timestamp": now_iso(), "request_id": rid()}
+            data={"narration": "", "events": [], "error": str(e)},
+            metadata={}
         )
 
-@app.get("/api/v1/autocontrol/artifacts/result")
-def download_result(file: str = Query(..., description="결과 CSV 파일명")):
-    target = (AUTOCONTROL_DIR / pathlib.Path(file).name).resolve()
-    base = AUTOCONTROL_DIR
-    if base not in target.parents and target != base:
-        raise HTTPException(status_code=400, detail="Invalid artifact path")
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    return FileResponse(path=str(target), filename=target.name, media_type="text/csv")
-
-# ─────────────────────────────────────────────────────────────────────-
-# 로컬 실행
-# ─────────────────────────────────────────────────────────────────────-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=API_PORT, reload=True)

@@ -1,4 +1,3 @@
-# ac_utils.py — 공용 유틸: 시간/경로/가중치/후보 스코어/예측 등
 import os, pathlib, hashlib, base64, requests
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
@@ -23,20 +22,12 @@ def save_result_csv(rows: List[Dict[str, Any]], out_dir: pathlib.Path, task_id: 
 def artifact_download_url(filename: str) -> str:
     return f"/api/v1/autocontrol/artifacts/result?file={filename}"
 
-# --------------------------------------------------------------------
-# CSV 로딩: 숫자형 컬럼만 선택 (카테고리/문자열 제외, 전처리 없이 바로 사용)
-# --------------------------------------------------------------------
 def load_csv_and_features(
     csv_path: Optional[str],
     default_csv_path: pathlib.Path,
     *,
     numeric_only: bool = True,
 ) -> Tuple[pathlib.Path, pd.DataFrame, pd.DataFrame, List[str]]:
-    """
-    CSV를 읽고 feature_df를 구성한다.
-    - numeric_only=True: 숫자형(dtypes number) 컬럼만 선택 (object/카테고리/날짜형 제외)
-    - 반환: (csv_file, 원본df, feature_df(숫자만), feature_names)
-    """
     csv_file = pathlib.Path(csv_path).expanduser().resolve() if csv_path else pathlib.Path(default_csv_path).resolve()
     if not csv_file.exists():
         raise FileNotFoundError(f"CSV not found: {csv_file}")
@@ -44,7 +35,6 @@ def load_csv_and_features(
     df = pd.read_csv(csv_file)
 
     if numeric_only:
-        # pandas가 숫자로 파싱한 컬럼만 유지
         feature_df = df.select_dtypes(include=["number"]).copy()
     else:
         feature_df = df.copy()
@@ -59,10 +49,6 @@ def load_csv_and_features(
     return csv_file, df, feature_df, csv_features
 
 def ensure_target_in_features(feature_df: pd.DataFrame, target_col: str):
-    """
-    target_col이 feature_df(숫자형만 포함)에 존재하는지 확인.
-    존재하지 않으면 명확한 에러 메시지로 안내.
-    """
     if target_col not in feature_df.columns:
         preview = list(feature_df.columns)[:10]
         raise ValueError(
@@ -70,7 +56,6 @@ def ensure_target_in_features(feature_df: pd.DataFrame, target_col: str):
             f"Numeric columns preview: {preview}{' ...' if feature_df.shape[1] > 10 else ''}"
         )
 
-# ---- weights ingest ----
 def weights_from_url(url: str, weights_cache_dir: pathlib.Path, timeout: int = 20) -> pathlib.Path:
     r = requests.get(url, timeout=timeout)
     r.raise_for_status()
@@ -90,9 +75,6 @@ def weights_from_b64(b64: str, weights_cache_dir: pathlib.Path) -> pathlib.Path:
     return path.resolve()
 
 def fetch_pred_activation(base_url: str, task_id: str, inline_base64: bool = True) -> Dict[str, Any]:
-    """
-    prediction agent의 /api/v1/prediction/activate_autocontrol/{taskId} 호출
-    """
     url = f"{base_url.rstrip('/')}/api/v1/prediction/activate_autocontrol/{task_id}?inline_base64={'true' if inline_base64 else 'false'}"
     r = requests.get(url, timeout=20)
     r.raise_for_status()
@@ -111,9 +93,6 @@ def ingest_weights(
     weights_cache_dir: pathlib.Path,
     events: List[str],
 ) -> Dict[str, Any]:
-    """
-    우선순위: 1) weights_b64  2) weight_url  3) weight_path  4) prediction activation
-    """
     def _note(msg: str): events.append(f"[{now_iso()}] {msg}")
 
     # 1) base64
@@ -155,7 +134,6 @@ def ingest_weights(
             _note(f"[AC] prediction activation fetch failed: {e}")
     return {}
 
-# ---- 간단 예측/스코어 함수 (기존과 동일) ----
 def apply_constraints(adjustments: Dict[str, float], constraints: Optional[Dict[str, Any]]) -> Dict[str, float]:
     if not constraints or not isinstance(constraints, dict):
         return adjustments

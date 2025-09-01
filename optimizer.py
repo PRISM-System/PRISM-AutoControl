@@ -1,10 +1,15 @@
-# optimizer.py — 제어 입력 x 최적화 (좌표탐색 + 랜덤 리스타트)
 from typing import Dict, Any, List, Optional, Tuple
 import math, random
 
 from utils import apply_constraints, predict_expected_y, score_candidate
 
-# 기본 바운드/스텝 (제약 미지정 시)
+try:
+    import numpy as _np
+    from scipy import optimize as _spopt 
+    _HAS_SCIPY = True
+except Exception:
+    _HAS_SCIPY = False
+
 _DEFAULT_BOUNDS = (-0.5, 0.5)
 _DEFAULT_STEPS  = 0.05
 
@@ -29,27 +34,19 @@ def _make_bounds(variables: List[str], constraints: Optional[Dict[str, Any]]) ->
     return out
 
 def _objective(expected_y: float, setpoint: float, adjustments: Dict[str, float]) -> float:
-    # score와 동일한 형태로 목표화
     return score_candidate(expected_y, setpoint, adjustments)
 
-def optimize_control(
-    *,
-    variables: List[str],                 # 조작변수 이름들 (MV)
-    last_y: float, delta_y: float,        # 최근 타깃 y 상태
-    setpoint: float, horizon: int,        # 목표/구간
-    constraints: Optional[Dict[str, Any]],
-    top_k: int = 1,
-    # 서러게이트 예측 함수 (옵션): 시그니처는 아래와 동일
-    expected_y_fn = None,                 # fn(last_y, delta_y, adjustments, horizon, feature_df=None, target_col=None) -> float
-    feature_df=None,
-    target_col: Optional[str] = None,
-    # 탐색 하이퍼파라미터
-    restarts: int = 12,
-    iters_per_restart: int = 80,
-) -> List[Dict[str, Any]]:
+def _predict_wrapper(expected_y_fn, last_y, delta_y, horizon, feature_df, target_col):
+    def _predict(adjs: Dict[str, float]) -> float:
+        if expected_y_fn:
+            return float(expected_y_fn(last_y, delta_y, adjs, horizon, feature_df=feature_df, target_col=target_col))
+        return float(predict_expected_y(last_y, delta_y, adjs, horizon))
+    return _predict
 
-    bounds = _make_bounds(variables, constraints)
-
+def _coordinate_search(
+    variables, bounds, predict, setpoint,
+    restarts=12, iters_per_restart=80
+):
     def clamp_round_vec(adjs: Dict[str, float]) -> Dict[str, float]:
         out = {}
         for v in variables:
@@ -58,13 +55,6 @@ def optimize_control(
             out[v] = _round_to_step(x, st)
         return out
 
-    def predict(adjs: Dict[str, float]) -> float:
-        if expected_y_fn:
-            return float(expected_y_fn(last_y, delta_y, adjs, horizon, feature_df=feature_df, target_col=target_col))
-        # 폴백: 간이 동역학
-        return float(predict_expected_y(last_y, delta_y, adjs, horizon))
-
-    # 초기화 후보 생성기
     def random_init() -> Dict[str, float]:
         adjs = {}
         for v in variables:
@@ -74,69 +64,162 @@ def optimize_control(
         return adjs
 
     results: List[Dict[str, Any]] = []
-
     for _ in range(restarts):
-        # 0) 시작점: 0 또는 랜덤
         cur = {v: 0.0 for v in variables}
-        # gap이 크면 랜덤도 한 번 써봄
-        if abs(setpoint - last_y) > 1.0:
-            cur = random_init()
         cur = clamp_round_vec(cur)
-
         ey = predict(cur)
         cur_score = _objective(ey, setpoint, cur)
 
         for _iter in range(iters_per_restart):
             improved = False
-            # 좌표 탐색
             for v in variables:
                 lo, hi, st = bounds[v]
                 base = cur[v]
-                # 세 방향 평가: 그대로 / +step / -step
                 candidates = [base, base + st, base - st]
-                best_v = base
-                best_score = cur_score
-                best_ey = ey
+                best_v, best_score, best_ey = base, cur_score, ey
                 for cand in candidates:
                     cand = max(min(cand, hi), lo)
                     cand = _round_to_step(cand, st)
                     if cand == base:
-                        eyy = ey
-                        sc = cur_score
+                        eyy, sc = ey, cur_score
                     else:
-                        trial = dict(cur)
-                        trial[v] = cand
+                        trial = dict(cur); trial[v] = cand
                         eyy = predict(trial)
                         sc = _objective(eyy, setpoint, trial)
                     if sc < best_score - 1e-9:
-                        best_score, best_v, best_ey = sc, cand, eyy
-
+                        best_v, best_score, best_ey = cand, sc, eyy
                 if best_v != base:
-                    cur[v] = best_v
-                    cur_score = best_score
-                    ey = best_ey
-                    improved = True
-
+                    cur[v], cur_score, ey, improved = best_v, best_score, best_ey, True
             if not improved:
-                break  # 정체 시 종료
+                break
+        results.append({"adjustments": dict(cur), "expected_y": float(ey), "score": float(cur_score)})
 
-        results.append({"adjustments": dict(cur), "expected_y": round(float(ey), 6), "score": round(float(cur_score), 6)})
-
-    # 중복 제거(조정벡터가 같은 것 합치기) + 정렬
     uniq: Dict[str, Dict[str, Any]] = {}
     for r in results:
         key = "|".join(f"{k}:{r['adjustments'][k]:.6f}" for k in variables)
         if key not in uniq or r["score"] < uniq[key]["score"]:
             uniq[key] = r
     ranked = sorted(uniq.values(), key=lambda x: x["score"])
+    return ranked
 
-    # top-k로 후보아이디 부여
+def optimize_control(
+    *,
+    variables: List[str],
+    last_y: float, delta_y: float,
+    setpoint: float, horizon: int,
+    constraints: Optional[Dict[str, Any]],
+    top_k: int = 1,
+    expected_y_fn = None,
+    feature_df=None,
+    target_col: Optional[str] = None,
+    restarts: int = 12,
+    iters_per_restart: int = 80,
+    method: str = "coordinate",  # "coordinate" | "nelder-mead" | "powell" | "lbfgsb" | "tnc" | "slsqp" | "cobyla" | "trust-constr" | "de" | "anneal" | "auto"
+    maxiter: Optional[int] = None,
+    random_seed: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    if random_seed is not None:
+        random.seed(random_seed)
+        try:
+            _np.random.seed(random_seed)  # type: ignore
+        except Exception:
+            pass
+
+    bounds = _make_bounds(variables, constraints)
+    predict = _predict_wrapper(expected_y_fn, last_y, delta_y, horizon, feature_df, target_col)
+
+    if method == "coordinate" or not _HAS_SCIPY:
+        ranked = _coordinate_search(variables, bounds, predict, setpoint, restarts=restarts, iters_per_restart=iters_per_restart)
+    else:
+        var_idx = {v:i for i, v in enumerate(variables)}
+        lo_vec = [_DEFAULT_BOUNDS[0]] * len(variables)
+        hi_vec = [_DEFAULT_BOUNDS[1]] * len(variables)
+        steps  = [_DEFAULT_STEPS] * len(variables)
+
+        for i, v in enumerate(variables):
+            lo, hi, st = bounds[v]
+            lo_vec[i], hi_vec[i], steps[i] = lo, hi, st
+
+        def vec_to_adj(x_vec):
+            return {v: float(_round_to_step(max(min(x_vec[i], hi_vec[i]), lo_vec[i]), steps[i])) for i, v in enumerate(variables)}
+
+        def f_obj(x_vec):
+            adjs = vec_to_adj(x_vec)
+            ey = predict(adjs)
+            return _objective(ey, setpoint, adjs)
+
+        x0 = _np.array([0.0 for _ in variables], dtype=float)
+
+        ranked = []
+        m = method.lower()
+        try:
+            if m in {"nelder-mead", "nelder", "nm"}:
+                res = _spopt.minimize(f_obj, x0, method="Nelder-Mead", options={"maxiter": maxiter or 500})
+                ranked = [{"adjustments": vec_to_adj(res.x), "expected_y": float(predict(vec_to_adj(res.x))), "score": float(res.fun)}]
+
+            elif m in {"powell"}:
+                res = _spopt.minimize(f_obj, x0, method="Powell", bounds=list(zip(lo_vec, hi_vec)), options={"maxiter": maxiter or 500})
+                ranked = [{"adjustments": vec_to_adj(res.x), "expected_y": float(predict(vec_to_adj(res.x))), "score": float(res.fun)}]
+
+            elif m in {"lbfgsb", "l-bfgs-b", "l-bfgs"}:
+                res = _spopt.minimize(f_obj, x0, method="L-BFGS-B", bounds=list(zip(lo_vec, hi_vec)), options={"maxiter": maxiter or 300})
+                ranked = [{"adjustments": vec_to_adj(res.x), "expected_y": float(predict(vec_to_adj(res.x))), "score": float(res.fun)}]
+
+            elif m in {"tnc"}:
+                res = _spopt.minimize(f_obj, x0, method="TNC", bounds=list(zip(lo_vec, hi_vec)), options={"maxiter": maxiter or 300})
+                ranked = [{"adjustments": vec_to_adj(res.x), "expected_y": float(predict(vec_to_adj(res.x))), "score": float(res.fun)}]
+
+            elif m in {"slsqp"}:
+                res = _spopt.minimize(f_obj, x0, method="SLSQP", bounds=list(zip(lo_vec, hi_vec)), options={"maxiter": maxiter or 300})
+                ranked = [{"adjustments": vec_to_adj(res.x), "expected_y": float(predict(vec_to_adj(res.x))), "score": float(res.fun)}]
+
+            elif m in {"cobyla"}:
+                # COBYLA는 bounds 직접 지원 X → 목적함수 내에서 clamp
+                res = _spopt.minimize(f_obj, x0, method="COBYLA", options={"maxiter": maxiter or 500})
+                ranked = [{"adjustments": vec_to_adj(res.x), "expected_y": float(predict(vec_to_adj(res.x))), "score": float(res.fun)}]
+
+            elif m in {"trust-constr", "trust"}:
+                res = _spopt.minimize(
+                    f_obj, x0, method="trust-constr",
+                    bounds=_spopt.Bounds(lo_vec, hi_vec),
+                    options={"maxiter": maxiter or 300}
+                )
+                ranked = [{"adjustments": vec_to_adj(res.x), "expected_y": float(predict(vec_to_adj(res.x))), "score": float(res.fun)}]
+
+            elif m in {"de", "differential_evolution"}:
+                res = _spopt.differential_evolution(
+                    f_obj, bounds=list(zip(lo_vec, hi_vec)),
+                    maxiter=maxiter or 1000, polish=True
+                )
+                ranked = [{"adjustments": vec_to_adj(res.x), "expected_y": float(predict(vec_to_adj(res.x))), "score": float(res.fun)}]
+
+            elif m in {"anneal", "dual_annealing"}:
+                res = _spopt.dual_annealing(
+                    f_obj, bounds=list(zip(lo_vec, hi_vec)),
+                    maxiter=maxiter or 500
+                )
+                ranked = [{"adjustments": vec_to_adj(res.x), "expected_y": float(predict(vec_to_adj(res.x))), "score": float(res.fun)}]
+
+            elif m in {"auto"}:
+                # 간단한 자동 전략: 전역 탐색(DE) → 국소(SLSQP)
+                res_de = _spopt.differential_evolution(f_obj, bounds=list(zip(lo_vec, hi_vec)), maxiter=maxiter or 300, polish=False)
+                res = _spopt.minimize(f_obj, res_de.x, method="SLSQP", bounds=list(zip(lo_vec, hi_vec)), options={"maxiter": 200})
+                ranked = [{"adjustments": vec_to_adj(res.x), "expected_y": float(predict(vec_to_adj(res.x))), "score": float(res.fun)}]
+
+            else:
+                # 알 수 없는 메서드는 좌표탐색
+                ranked = _coordinate_search(variables, bounds, predict, setpoint, restarts=restarts, iters_per_restart=iters_per_restart)
+
+        except Exception:
+            ranked = _coordinate_search(variables, bounds, predict, setpoint, restarts=restarts, iters_per_restart=iters_per_restart)
+
     out = []
+    ranked = sorted(ranked, key=lambda x: x["score"])
     for i, r in enumerate(ranked[:top_k], start=1):
         out.append({
             "id": f"cand_{i}",
             "adjustments": r["adjustments"],
-            "expected_y": r["expected_y"],
-            "score": r["score"]
+            "expected_y": round(float(r["expected_y"]), 6),
+            "score": round(float(r["score"]), 6)
         })
     return out
