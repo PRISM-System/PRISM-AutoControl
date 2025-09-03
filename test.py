@@ -1,56 +1,85 @@
-import requests, json, os
+#!/usr/bin/env python3
+import requests
+import json
 
-BASE = "http://127.0.0.1:8100" 
+BASE_URL = "http://127.0.0.1:8100/api/v1"
 
-nl = (
-    "CMP 센서의 MOTOR_CURRENT가 너무 높은 상황이야. "
-    "SLURRY_FLOW_RATE을 조정하여 MOTOR_CURRENT를 14구간 내에 12까지 줄여야 해. "
-)
+TASK_ID = "cmp_task_001"
 
-r1 = requests.post(f"{BASE}/api/v1/autocontrol/parse-nl", json={"query": nl})
-r1.raise_for_status()
-parsed = r1.json()
-spec = parsed["data"]  
-print("[parse-nl] OK")
-print(json.dumps(parsed, ensure_ascii=False, indent=2))
+def call_orchestration_assign():
+    url = f"{BASE_URL}/task/{TASK_ID}/autocontrol/assign"
+    payload = {
+        "task_id": TASK_ID,
+        "agent_assignments": [
+            {
+                "agent_id": "autocontrol",
+                "agent_type": "planner",
+                "execution_order": {
+                    "nl_query": (
+                        "CMP 센서의 MOTOR_CURRENT가 너무 높은 상황이야. "
+                        "HEAD_ROTATION과 SLURRY_FLOW_RATE을 조정하여 "
+                        "MOTOR_CURRENT를 1구간 내에 17.5까지 줄여야 해."
+                    ),
+                    "surrogate_model": "sklearn:random_forest_regressor",
+                    "surrogate_params": "{\"n_estimators\":200}",
+                    "opt_method": "lbfgsb",
+                    "maxiter": 20,
+                    "agent_base_url": None,
+                    "agent_task_id": "autocontrol_1",
+                    "agent_inline": True,
+                    "weight_local_path": "string"
+                }
+            }
+        ]
+    }
+    r = requests.put(url, json=payload)
+    print("[assign] status:", r.status_code)
+    try:
+        print(json.dumps(r.json(), indent=2, ensure_ascii=False))
+    except Exception:
+        print(r.text)
+    r.raise_for_status()
 
-params = {
-    "surrogate_model": "sklearn:random_forest_regressor",    # 또는 "sklearn:random_forest_regressor"
-    "opt_method": "lbfgsb",     # 또는 "powell", "de", "slsqp", ...
-    # --- 예측 에이전트 스냅샷을 써서 가중치 받으려면 아래 주석 해제 ---
-    # "agent_base_url": "http://127.0.0.1:8001",
-    # "agent_task_id": spec.get("taskId"),  # parse 결과의 taskId 사용
-    # "agent_inline": "true",
-}
 
-r2 = requests.post(f"{BASE}/api/v1/autocontrol/run-direct", params=params, json=spec)
-r2.raise_for_status()
-out = r2.json()
-print("\n[run-direct] OK")
+def call_run_direct():
+    url = f"{BASE_URL}/autocontrol/run-direct"
+    payload = {
+        "taskId": TASK_ID,
+        "acID": "ac_7b32d9",
+        "feature_names": ["HEAD_ROTATION", "SLURRY_FLOW_RATE"],
+        "target_col": "MOTOR_CURRENT",
+        "control": {"setpoint": 17.5, "horizon": 10},
+        "constraints": {
+            "bounds": {
+                "HEAD_ROTATION": {"min": -50, "max": 50, "step": 1.0},
+                "SLURRY_FLOW_RATE": {"min": -200, "max": 200, "step": 5.0},
+            }
+        },
+        "csv_path": "/mnt/c/Users/chanh/Desktop/IITP_2025/PRISM-AutoControl/autocontrol/data/Industrial_DB_sample/SEMI_CMP_SENSORS.csv",
+        "fromAgent": "orch",
+        "objective": "control",
+    }
+    params = {
+        "surrogate_model": "sklearn:random_forest_regressor",
+        "surrogate_params": "{\"n_estimators\":200}",
+        "opt_method": "lbfgsb",
+        "maxiter": 20,
+    }
+    r = requests.post(url, json=payload, params=params)
+    print("[run-direct] status:", r.status_code)
+    try:
+        print(json.dumps(r.json(), indent=2, ensure_ascii=False))
+    except Exception:
+        print(r.text)
+    r.raise_for_status()
 
-print(json.dumps(
-    {
-        "modelSelected": out["data"]["modelSelected"],
-        "candidates": [out["data"]["candidates"][0]] if out["data"]["candidates"] else [],
-        "result_csv_path": out["data"]["result_csv_path"],
-    },
-    ensure_ascii=False, indent=2
-))
-print("\n[nl-answer]", out.get("metadata", {}).get("nl_answer"))
-result_path = out["data"]["result_csv_path"]
 
-def save_bytes_to(fname: str, content: bytes):
-    with open(fname, "wb") as f:
-        f.write(content)
-    print(f"[result.csv] saved -> {fname}")
+def main():
+    print("[assign+run] 시작 …")
+    call_orchestration_assign()
+    call_run_direct()
+    print("[done]")
 
-if isinstance(result_path, str) and result_path.startswith("/api/"):
-    resp = requests.get(f"{BASE}{result_path}")
-    
-    resp.raise_for_status()
-    save_bytes_to("result.csv", resp.content)
-else:
-    if not os.path.exists(result_path):
-        raise SystemExit(f"result_csv_path not found: {result_path}")
-    with open(result_path, "rb") as f:
-        save_bytes_to("result.csv", f.read())
+
+if __name__ == "__main__":
+    main()

@@ -1,16 +1,13 @@
-# llm_io.py
 import os, json, requests, datetime
 from typing import Any, Dict, List
 
 class LLMBridge:
     def __init__(self, base_url=None, api_key=None, model=None):
-        # base_url 예: "http://147.47.39.144:8001/v1" (끝에 /v1 포함해도 됨)
         self.base_url = (base_url or os.getenv("OPENAI_BASE_URL", "http://147.47.39.144:8001/v1")).rstrip("/")
         self.api_key  = api_key or os.getenv("OPENAI_API_KEY", "EMPTY")
         self.model    = model  or os.getenv("OPENAI_MODEL", "Qwen/Qwen3-14B")
         self.url      = f"{self.base_url}/chat/completions"
 
-    # 공통 POST 래퍼
     def _chat(self, payload: dict) -> dict:
         headers = {"Content-Type": "application/json"}
         if self.api_key and self.api_key != "EMPTY":
@@ -19,21 +16,12 @@ class LLMBridge:
         try:
             r.raise_for_status()
         except requests.HTTPError as e:
-            # 디버깅에 도움 되도록 서버 응답 앞부분 포함
             raise RuntimeError(
                 f"LLM request failed ({r.status_code}) to {self.url}: {r.text[:200]}"
             ) from e
         return r.json()
 
-    # -------------------------------
-    # (A) 오토컨트롤 전용: NL → JSON (툴콜 강제)
-    # -------------------------------
     def _extract_autocontrol_spec(self, nl_query: str) -> dict:
-        """
-        오토컨트롤 에이전트용 자연어 파서.
-        1) tool_calls로 시도
-        2) 실패하면 일반 프롬프트(JSON만)로 폴백
-        """
         tool_schema = {
             "type": "function",
             "function": {
@@ -56,7 +44,6 @@ class LLMBridge:
             }
         }
 
-        # 1) tool_calls 경로 (지원하는 서버에서는 이게 더 견고)
         try:
             payload = {
                 "model": self.model,
@@ -78,7 +65,6 @@ class LLMBridge:
                 args_str = calls[0]["function"]["arguments"]
                 spec = json.loads(args_str)
             else:
-                # 혹시 텍스트로 JSON만 왔다면 파싱
                 txt = msg.get("content") or ""
                 s, e = txt.find("{"), txt.rfind("}")
                 if s != -1 and e != -1:
@@ -86,7 +72,6 @@ class LLMBridge:
                 else:
                     raise ValueError("no tool call")
         except Exception:
-            # 2) 폴백: 일반 프롬프트로 JSON만 반환하도록 강제
             payload2 = {
                 "model": self.model,
                 "messages": [
@@ -107,7 +92,6 @@ class LLMBridge:
                 raise RuntimeError(f"LLM did not return JSON: {txt[:200]}")
             spec = json.loads(txt[s:e+1])
 
-        # 보정: id 자동 생성
         import datetime as _dt
         if not spec.get("taskId"):
             spec["taskId"] = "task_" + _dt.datetime.utcnow().strftime("%Y%m%d%H%M%S")
@@ -115,71 +99,10 @@ class LLMBridge:
             spec["acID"] = "ac_" + _dt.datetime.utcnow().strftime("%H%M%S%f")[:10]
         return spec
 
-    # -------------------------------
-    # (B) (기존) 예측 전용: NL → JSON (툴콜 강제)
-    # -------------------------------
-    def _extract_json_from_text(self, nl_query: str) -> dict:
-        """
-        예측 에이전트용: timeRange/sensor_name/target_cols에 맞춘 스키마.
-        """
-        tool_schema = {
-            "type": "function",
-            "function": {
-                "name": "build_direct_spec",
-                "description": "Map NL prediction request into a strict schema for run-direct.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "taskId":      {"type": "string", "description": "Unique task id"},
-                        "timeRange":   {"type": "string", "description": "e.g. 'YYYY-MM-DD HH:MM:SS ~ YYYY-MM-DD HH:MM:SS'"},
-                        "sensor_name": {"type": "string", "description": "Sensor group name, e.g. CMP"},
-                        "target_cols": {"type": "string", "description": "Target column name"},
-                        "constraints": {"type": "object"},
-                        "userRole":    {"type": "string"}
-                    },
-                    "required": ["timeRange","sensor_name","target_cols"]
-                }
-            }
-        }
-
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content":
-                    "Return ONLY a function call to build_direct_spec. "
-                    "No prose, no <think>, no extra text."},
-                {"role": "user", "content": nl_query}
-            ],
-            "tools": [tool_schema],
-            "tool_choice": {"type": "function", "function": {"name": "build_direct_spec"}},
-            "temperature": 0.0,
-            "max_tokens": 300
-        }
-
-        resp = self._chat(payload)
-        msg = resp["choices"][0]["message"]
-        calls = msg.get("tool_calls") or []
-        if not calls:
-            txt = msg.get("content") or ""
-            s, e = txt.find("{"), txt.rfind("}")
-            if s != -1 and e != -1:
-                return json.loads(txt[s:e+1])
-            raise ValueError(f"LLM did not return a tool call or JSON: {txt[:200]}")
-
-        args_str = calls[0]["function"]["arguments"]
-        spec = json.loads(args_str)
-
-        if not spec.get("taskId"):
-            spec["taskId"] = "task_" + datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
-        return spec
-
-    # -------------------------------
-    #  (7) 한국어 전항목 내러티브 (LLM + 폴백)
-    # -------------------------------
     def _narrate(self, payload: Dict[str, Any]) -> str:
         try:
             system_msg = (
-                "너의 임무는 제조 예측 파이프라인의 JSON 결과를 한국어로 "
+                "너의 임무는 제조 자유제어 파이프라인의 JSON 결과를 한국어로 "
                 "필드 누락 없이 그대로 설명문으로 풀어쓰는 것이다. "
                 "절대 새로운 가정/수치/해석을 추가하지 말고 JSON에 있는 값만 사용하라. "
                 "각 필드는 사람이 즉시 이해할 수 있도록 간결하게 항목별로 써라. "
@@ -188,14 +111,14 @@ class LLMBridge:
             user_msg = (
                 "다음 JSON의 모든 항목을 한국어로 자세히 설명하되, 아래 출력 형식을 지켜라.\n\n"
                 "출력 형식:\n"
-                "제목: PRISM 예측 결과 상세 보고\n"
+                "제목: PRISM 자유제어 결과 상세 보고\n"
                 "\n"
                 "섹션1: 요청 정보\n"
                 "- taskId: ...\n"
                 "- timeRange: ... (없으면 '정보 없음')\n"
                 "- sensor_name / target_col(또는 target_cols): ...\n"
                 "\n"
-                "섹션2: 모델/예측\n"
+                "섹션2: 모델/자유제어\n"
                 "- modelSelected: ...\n"
                 "- pred_len: ...\n"
                 "- prediction: 값이 많으면 앞 5개와 뒤 5개, 전체 개수 표기. (예: [앞 5] 1,2,3,4,5 / [뒤 5] ... / 총 N개)\n"
@@ -238,12 +161,9 @@ class LLMBridge:
         except Exception:
             return self._fallback_ko(payload)
 
-    # -------------------------------
-    #  결정적 폴백 (LLM 없이 전항목 나열)
-    # -------------------------------
     def _fallback_ko(self, payload: Dict[str, Any]) -> str:
         lines: List[str] = []
-        lines.append("PRISM 예측 결과 상세 보고 (폴백 모드)")
+        lines.append("PRISM 자유제어 결과 상세 보고 (폴백 모드)")
         lines.append("")
 
         def fmt_scalar(v: Any) -> str:

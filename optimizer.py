@@ -9,7 +9,13 @@ try:
     _HAS_SCIPY = True
 except Exception:
     _HAS_SCIPY = False
-
+_FREE = {
+    "enabled": False,
+    "no_bounds": True, 
+    "no_round":  True, 
+    "range":     5000.0, 
+    "step":      0.1, 
+}
 _DEFAULT_BOUNDS = (-0.5, 0.5)
 _DEFAULT_STEPS  = 0.05
 
@@ -17,19 +23,34 @@ def _norm_step(lo: float, hi: float, step: Optional[float]) -> float:
     if step and step > 0:
         return float(step)
     span = max(hi - lo, 1e-6)
-    return round(span / 20.0, 10)
+    return round(span / 3.0, 10)
 
 def _round_to_step(x: float, step: float) -> float:
+    if _FREE["enabled"] and _FREE["no_round"]:
+        return round(x, 10)  
     return round(round(x / step) * step, 10)
 
 def _make_bounds(variables: List[str], constraints: Optional[Dict[str, Any]]) -> Dict[str, Tuple[float,float,float]]:
+
+    _FREE["enabled"] = False
+    if isinstance(constraints, dict) and constraints.get("free_explore"):
+        _FREE["enabled"]  = True
+        _FREE["no_bounds"] = bool(constraints.get("no_bounds", True))
+        _FREE["no_round"]  = bool(constraints.get("no_step",  True))
+        _FREE["range"]     = float(constraints.get("free_range", 50.0))
+        _FREE["step"]      = float(constraints.get("free_step",  0.1))
+
     bounds_cfg = (constraints or {}).get("bounds", {}) if isinstance(constraints, dict) else {}
     out: Dict[str, Tuple[float,float,float]] = {}
     for v in variables:
-        b = bounds_cfg.get(v, {})
-        lo = float(b.get("min", _DEFAULT_BOUNDS[0]))
-        hi = float(b.get("max", _DEFAULT_BOUNDS[1]))
-        st = _norm_step(lo, hi, b.get("step"))
+        if _FREE["enabled"] and _FREE["no_bounds"]:
+            lo, hi = -_FREE["range"], _FREE["range"]   
+            st     = _FREE["step"]              
+        else:
+            b  = bounds_cfg.get(v, {})
+            lo = float(b.get("min", _DEFAULT_BOUNDS[0]))
+            hi = float(b.get("max", _DEFAULT_BOUNDS[1]))
+            st = _norm_step(lo, hi, b.get("step"))
         out[v] = (lo, hi, st)
     return out
 
@@ -52,6 +73,8 @@ def _coordinate_search(
         for v in variables:
             lo, hi, st = bounds[v]
             x = max(min(adjs.get(v, 0.0), hi), lo)
+            if not (_FREE["enabled"] and _FREE["no_bounds"]):
+                x = max(min(x, hi), lo)
             out[v] = _round_to_step(x, st)
         return out
 
@@ -65,8 +88,11 @@ def _coordinate_search(
 
     results: List[Dict[str, Any]] = []
     for _ in range(restarts):
-        cur = {v: 0.0 for v in variables}
-        cur = clamp_round_vec(cur)
+        if _ == 0:
+            cur = {v: 0.0 for v in variables}
+            cur = clamp_round_vec(cur)
+        else:
+            cur = random_init() 
         ey = predict(cur)
         cur_score = _objective(ey, setpoint, cur)
 
@@ -78,7 +104,8 @@ def _coordinate_search(
                 candidates = [base, base + st, base - st]
                 best_v, best_score, best_ey = base, cur_score, ey
                 for cand in candidates:
-                    cand = max(min(cand, hi), lo)
+                    if not (_FREE["enabled"] and _FREE["no_bounds"]):
+                        cand = max(min(cand, hi), lo)
                     cand = _round_to_step(cand, st)
                     if cand == base:
                         eyy, sc = ey, cur_score
@@ -141,7 +168,13 @@ def optimize_control(
             lo_vec[i], hi_vec[i], steps[i] = lo, hi, st
 
         def vec_to_adj(x_vec):
-            return {v: float(_round_to_step(max(min(x_vec[i], hi_vec[i]), lo_vec[i]), steps[i])) for i, v in enumerate(variables)}
+            out = {}
+            for i, v in enumerate(variables):
+                x = float(x_vec[i])
+                if not (_FREE["enabled"] and _FREE["no_bounds"]):
+                    x = max(min(x, hi_vec[i]), lo_vec[i])
+                out[v] = _round_to_step(x, steps[i])
+            return out
 
         def f_obj(x_vec):
             adjs = vec_to_adj(x_vec)

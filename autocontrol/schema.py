@@ -16,7 +16,7 @@ class AutoControlSpec(BaseModel):
     target_col: str = Field(..., description="제어 타겟이 되는 Controlled Variable (제어 변수) 이름")
     control: AutoControlTargetSpec = Field(..., description="제어 목표 값(setpoint) 및 제어 구간(horizon) 정의")
     constraints: Optional[Any] = Field(None, description="제어 제약 조건")
-
+    csv_path : Optional[str] = Field(None, description="Local DB CSV 경로")
 class AutoControlRunRequest(AutoControlSpec):
     """
     AutoControlRunRequest: 제어 실행 요청 스키마
@@ -64,49 +64,49 @@ class AutoControlRunResponse(BaseModel):
     data: AutoControlRunResult = Field(..., description="제어 실행 결과")
     metadata: Dict[str, str] = Field(..., description="부가 메타데이터")
 
-class AC_NLRequest(BaseModel):
-    """
-    AC_NLRequest: 자연어 질의 요청 스키마
-    - Orchestra Agent로부터 받는 입력 스키마
-    """
-    query: str = Field(
-        ...,
-        description="자연어 제어 요청 문장",
-        example="CMP 센서의 MOTOR_CURRENT가 너무 높은 상황이야. HEAD_ROTATION을 조정하여 MOTOR_CURRENT가를 10구간 내에 13.4까지 줄여야 해."
-    )
+# class AC_NLRequest(BaseModel):
+#     """
+#     AC_NLRequest: 자연어 질의 요청 스키마
+#     - Orchestra Agent로부터 받는 입력 스키마
+#     """
+#     query: str = Field(
+#         ...,
+#         description="자연어 제어 요청 문장",
+#         example="CMP 센서의 MOTOR_CURRENT가 너무 높은 상황이야. HEAD_ROTATION을 조정하여 MOTOR_CURRENT가를 10구간 내에 13.4까지 줄여야 해."
+#     )
 
-class AC_NLParsedResponse(BaseModel):
-    """
-    AC_NLParsedResponse: 자연어 파싱 스키마
-    - Orchestra Agent로부터 받은 자연어 입력을 구조화된 AutoControlSpec 스키마로 정형
-    """
-    code: Literal["SUCCESS","ERROR"] = Field("SUCCESS", description="파싱 결과 상태 코드")
-    data: AutoControlSpec = Field(..., description="파싱된 제어 스펙")
-    metadata: Dict[str, str] = Field(..., description="부가 메타데이터")
+# class AC_NLParsedResponse(BaseModel):
+#     """
+#     AC_NLParsedResponse: 자연어 파싱 스키마
+#     - Orchestra Agent로부터 받은 자연어 입력을 구조화된 AutoControlSpec 스키마로 정형
+#     """
+#     code: Literal["SUCCESS","ERROR"] = Field("SUCCESS", description="파싱 결과 상태 코드")
+#     data: AutoControlSpec = Field(..., description="파싱된 제어 스펙")
+#     metadata: Dict[str, str] = Field(..., description="부가 메타데이터")
 
-class NarrateRequest(BaseModel):
-    """
-    NarrateRequest: 나레이션 생성 요청 스키마
-    - payload에는 보통 AutoControlRunResponse 전체 JSON을 넣음
-    """
-    payload: Dict[str, Any] = Field(
-        ..., description="나레이션 입력 payload (제어 실행 응답 전체; AutoControlRunResponse 형식)"
-    )
-    tone: Optional[str] = "operator-ko"
+# class NarrateRequest(BaseModel):
+#     """
+#     NarrateRequest: 나레이션 생성 요청 스키마
+#     - payload에는 보통 AutoControlRunResponse 전체 JSON을 넣음
+#     """
+#     payload: Dict[str, Any] = Field(
+#         ..., description="나레이션 입력 payload (제어 실행 응답 전체; AutoControlRunResponse 형식)"
+#     )
+#     tone: Optional[str] = "operator-ko"
 
-class NarrateData(BaseModel):
-    """
-    NarrateData: 나레이션 결과 페이로드
-    """
-    narration: str = Field(..., description="생성된 자연어 답변")
-    events: List[str] = Field(..., description="이벤트 로그")
-    error: Optional[str] = Field(None, description="오류 메시지 (실패 시에만 세팅)")
+# class NarrateData(BaseModel):
+#     """
+#     NarrateData: 나레이션 결과 페이로드
+#     """
+#     narration: str = Field(..., description="생성된 자연어 답변")
+#     events: List[str] = Field(..., description="이벤트 로그")
+#     error: Optional[str] = Field(None, description="오류 메시지 (실패 시에만 세팅)")
 
-class NarrateResponse(BaseModel):
-    """
-    NarrateResponse: 나레이션 결과 API 응답 스키마
-    - Orchestra Agent에게 넘겨줄 출력 스키마
-    """
-    code: Literal["SUCCESS","ERROR"] = Field("SUCCESS", description="자연어 답변 생성 결과 상태 코드")
-    data: NarrateData = Field(..., description="나레이션 결과 데이터")
-    metadata: Dict[str, Any] = Field(..., description="부가 메타데이터")
+# class NarrateResponse(BaseModel):
+#     """
+#     NarrateResponse: 나레이션 결과 API 응답 스키마
+#     - Orchestra Agent에게 넘겨줄 출력 스키마
+#     """
+#     code: Literal["SUCCESS","ERROR"] = Field("SUCCESS", description="자연어 답변 생성 결과 상태 코드")
+#     data: NarrateData = Field(..., description="나레이션 결과 데이터")
+#     metadata: Dict[str, Any] = Field(..., description="부가 메타데이터")
