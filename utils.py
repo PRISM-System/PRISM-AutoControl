@@ -66,4 +66,4 @@ def predict_expected_y(last_y: float, delta_y: float, adjustments: Dict[str, flo
 def score_candidate(expected_y: float, setpoint: float, adjustments: Dict[str, float]) -> float:
     gap = abs(expected_y - setpoint)
     l1  = sum(abs(v) for v in adjustments.values())
-    return float(gap + 0.3 * l1)
+    return float(gap + 0 * l1)

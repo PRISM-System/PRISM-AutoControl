@@ -27,7 +27,7 @@ except Exception:
     HAS_SKLEARN_TRAIN = False
 
 from module import risk_module, explain_module
-from llm_io import LLMBridge
+from llm_io import LLMBridge, LLMUnavailable, LLMBadResponse
 
 import requests 
 
@@ -343,7 +343,7 @@ def ac_run_direct(
         method=opt_method,
         maxiter=maxiter
     )
-
+    
     for r in ranked:
         r["setpoint_hint"] = setpoint
     risk = risk_module(feature_df, body.target_col, ranked)
@@ -433,6 +433,136 @@ def ac_run_direct(
 @app.put("/api/v1/task/{task_id}/autocontrol/assign", response_model=OrchestrationAssignResponse)
 def orchestration_assign(task_id: str, req: OrchestrationAssignRequest = Body(...)):
 
+    import re, json
+    try:
+        # sklearn 레지스트리 (surrogate.py)
+        from surrogate import _SKLEARN_REGISTRY
+    except Exception:
+        _SKLEARN_REGISTRY = {}
+
+    # ---------- helpers ----------
+    def _norm_key(s: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+    def _from_eo(eo, key, default=None):
+        """eo 또는 eo.options(=dict)에서 키를 안전 회수."""
+        if isinstance(eo, dict):
+            if key in eo:
+                return eo.get(key, default)
+            opts = eo.get("options", {}) or {}
+            if isinstance(opts, dict) and key in opts:
+                return opts.get(key, default)
+            return default
+        # Pydantic 모델(AgentExecutionOrder)인 경우
+        if hasattr(eo, key):
+            return getattr(eo, key, default)
+        if hasattr(eo, "options") and isinstance(getattr(eo, "options"), dict):
+            opts = getattr(eo, "options")
+            return opts.get(key, default)
+        return default
+
+    def _build_sklearn_alias_map(registry: dict) -> dict:
+        """_SKLEARN_REGISTRY로부터 포괄적 별칭 맵을 생성."""
+        alias_map = {}
+        if not registry:
+            return alias_map
+        for reg_key, (mod, cls_name, task) in registry.items():
+            target = f"sklearn:{reg_key}"
+
+            variants = set()
+            # registry key (with/without underscore)
+            variants.add(reg_key)                          # random_forest_regressor
+            variants.add(reg_key.replace("_", ""))         # randomforestregressor
+
+            # class name
+            variants.add(cls_name)                         # RandomForestRegressor
+            variants.add(cls_name.lower())                 # randomforestregressor
+            variants.add(_norm_key(cls_name))              # randomforestregressor
+
+            # base name (strip regressor/classifier)
+            base_by_cls = cls_name.lower().replace("regressor", "").replace("classifier", "")
+            base_by_key = reg_key.replace("_regressor", "").replace("_classifier", "")
+            variants.update({
+                base_by_cls, _norm_key(base_by_cls),
+                base_by_key, base_by_key.replace("_", "")
+            })
+
+            # common short aliases
+            if "random_forest" in reg_key:
+                variants.update(["rf", "rfr"] if "regressor" in reg_key else ["rf", "rfc"])
+            if "gradient_boosting" in reg_key:
+                variants.update(["gbr", "gbm", "gbdt"] if "regressor" in reg_key else ["gbc", "gbm", "gbdt"])
+            if reg_key in ("linear_regression", "ridge", "lasso"):
+                if reg_key == "linear_regression":
+                    variants.update(["linear", "linreg"])
+                else:
+                    variants.add(reg_key)  # ridge, lasso 는 그대로
+            if reg_key == "svr":
+                variants.update(["svr", "svm", "svmregressor"])
+            if reg_key == "svc":
+                variants.update(["svc", "svm", "svmclassifier"])
+
+            # fill map
+            for v in variants:
+                alias_map[_norm_key(v)] = target
+
+            # module-qualified forms
+            alias_map[_norm_key(f"{mod}.{cls_name}")] = target
+            alias_map[_norm_key(f"sklearn.{cls_name}")] = target
+
+        return alias_map
+
+    _SKLEARN_ALIAS_MAP = _build_sklearn_alias_map(_SKLEARN_REGISTRY)
+
+    def _normalize_surrogate_model(sm) -> str | None:
+        """다양한 표기 입력을 정규 포맷으로 변환."""
+        if not sm:
+            return None
+        s = str(sm).strip()
+        # 이미 "sklearn:xxx" 같은 레지스트리 포맷이면 그대로
+        if ":" in s:
+            return s
+
+        key = _norm_key(s)
+        # non-sklearn pass-through
+        if key in ("linear", "linreg"):
+            return "linear"
+
+        mapped = _SKLEARN_ALIAS_MAP.get(key)
+        if mapped:
+            return mapped
+
+        # "sklearn.svm.SVR" 같은 케이스 - 마지막 토큰으로 재시도
+        if "." in s:
+            last = s.split(".")[-1]
+            mapped = _SKLEARN_ALIAS_MAP.get(_norm_key(last))
+            if mapped:
+                return mapped
+
+        # 모르는 건 그대로 반환 (downstream에서 처리/에러)
+        return s
+
+    def _normalize_surrogate_params(sp):
+        """dict는 JSON으로, 문자열은 유효성 검증."""
+        if sp is None:
+            return None
+        if isinstance(sp, dict):
+            try:
+                return json.dumps(sp)
+            except Exception:
+                raise HTTPException(status_code=400, detail="surrogate_params dict JSON dump failed")
+        if isinstance(sp, str):
+            s = sp.strip()
+            if not s:
+                return None
+            try:
+                json.loads(s)  # 유효성 검사
+                return s
+            except Exception:
+                raise HTTPException(status_code=400, detail="surrogate_params must be a JSON string")
+        raise HTTPException(status_code=400, detail="surrogate_params must be dict or JSON string")
+
+    # ---------- pick target assignment ----------
     target = None
     for a in (req.agent_assignments or []):
         if (a.agent_id or "").lower() == "autocontrol":
@@ -444,6 +574,7 @@ def orchestration_assign(task_id: str, req: OrchestrationAssignRequest = Body(..
             updated_assignments=[UpdatedAssignment(agent_id="autocontrol", status="assigned")]
         )
 
+    # ---------- parse execution order ----------
     nl_query, opts = None, {}
     eo = target.execution_order
     if isinstance(eo, dict) and "nl_query" in eo:
@@ -453,7 +584,7 @@ def orchestration_assign(task_id: str, req: OrchestrationAssignRequest = Body(..
         nl_query = eo.strip()
     elif isinstance(eo, AgentExecutionOrder):
         nl_query = getattr(eo, "nl_query", None)
-        opts = getattr(eo, "options", {})
+        opts = getattr(eo, "options", {}) or {}
     else:
         return OrchestrationAssignResponse(
             task_id=req.task_id or task_id,
@@ -465,20 +596,47 @@ def orchestration_assign(task_id: str, req: OrchestrationAssignRequest = Body(..
             updated_assignments=[UpdatedAssignment(agent_id="autocontrol", status="assigned")]
         )
 
+    # ---------- extract spec from NL ----------
     bridge = LLMBridge()
-    spec = bridge._extract_autocontrol_spec(nl_query)
+    af = []
+    if isinstance(opts, dict) and isinstance(opts.get("feature_names"), list):
+        af = opts["feature_names"]
 
-    constraints = spec.get("constraints") or {}
+    try:
+        spec = bridge._extract_autocontrol_spec(nl_query, available_features=af)
+    except LLMUnavailable as e:
+        raise HTTPException(status_code=502, detail=f"LLM backend unavailable: {str(e)}")
+    except LLMBadResponse as e:
+        raise HTTPException(status_code=502, detail=f"LLM bad response: {str(e)}")
+
+    # ---------- merge constraints safely ----------
+    constraints = dict(spec.get("constraints") or {})
     if isinstance(opts, dict) and opts:
-        constraints.update(opts)
+        # feature_names는 spec에만 반영
         if isinstance(opts.get("feature_names"), list):
             spec["feature_names"] = opts["feature_names"]
+
+        # opts.constraints 하위 병합
+        if isinstance(opts.get("constraints"), dict):
+            c2 = opts["constraints"]
+            if isinstance(c2.get("bounds"), dict):
+                constraints.setdefault("bounds", {})
+                constraints["bounds"].update(c2["bounds"])
+            for k, v in c2.items():
+                if k != "bounds":
+                    constraints[k] = v
+
+        # 또는 opts.bounds 직접 주입
+        if isinstance(opts.get("bounds"), dict):
+            constraints.setdefault("bounds", {})
+            constraints["bounds"].update(opts["bounds"])
+
     spec["constraints"] = constraints
 
+    # ---------- setpoint/horizon ----------
     ctrl = spec.get("control") or {}
     setpoint = spec.get("setpoint", ctrl.get("setpoint"))
     horizon  = spec.get("horizon",  ctrl.get("horizon", 11))
-
     if setpoint is None:
         raise HTTPException(status_code=400, detail="setpoint missing from spec/control")
     try:
@@ -487,22 +645,52 @@ def orchestration_assign(task_id: str, req: OrchestrationAssignRequest = Body(..
     except Exception:
         raise HTTPException(status_code=400, detail="invalid setpoint/horizon type")
 
+    # ---------- basic validations ----------
+    if not spec.get("target_col"):
+        raise HTTPException(status_code=400, detail="target_col missing from spec")
+    if not (isinstance(spec.get("feature_names"), list) and spec["feature_names"]):
+        raise HTTPException(status_code=400, detail="feature_names must be a non-empty list")
+
+    # ---------- request body ----------
     body = AutoControlRunRequest(
         taskId=spec.get("taskId"),
         acID=spec.get("acID"),
-        feature_names=spec.get("feature_names") or [],
+        feature_names=spec["feature_names"],
         target_col=spec["target_col"],
         control={"setpoint": setpoint, "horizon": horizon},
-        constraints=spec.get("constraints"),
+        constraints=spec["constraints"],
     )
-    surrogate_model = getattr(eo, "surrogate_model", None) or eo.get("surrogate_model") if isinstance(eo, dict) else None
-    surrogate_params = getattr(eo, "surrogate_params", None) or eo.get("surrogate_params") if isinstance(eo, dict) else None
-    opt_method = getattr(eo, "opt_method", None) or eo.get("opt_method") if isinstance(eo, dict) else None
-    maxiter = getattr(eo, "maxiter", None) or eo.get("maxiter") if isinstance(eo, dict) else None
-    agent_base_url = getattr(eo, "agent_base_url", None) or eo.get("agent_base_url") if isinstance(eo, dict) else None
-    agent_task_id = getattr(eo, "agent_task_id", None) or eo.get("agent_task_id") if isinstance(eo, dict) else None
-    agent_inline = getattr(eo, "agent_inline", True) if hasattr(eo, "agent_inline") else eo.get("agent_inline", True) if isinstance(eo, dict) else True
-    weight_local_path = getattr(eo, "weight_local_path", None) or eo.get("weight_local_path") if isinstance(eo, dict) else None
+    print(body)
+
+    # ---------- collect optimization/surrogate options ----------
+    surrogate_model_raw   = _from_eo(eo, "surrogate_model")
+    surrogate_params_raw  = _from_eo(eo, "surrogate_params")
+    opt_method_raw        = _from_eo(eo, "opt_method")
+    maxiter_raw           = _from_eo(eo, "maxiter")
+    agent_base_url        = _from_eo(eo, "agent_base_url")
+    agent_task_id         = _from_eo(eo, "agent_task_id")
+    agent_inline          = _from_eo(eo, "agent_inline", True)
+    weight_local_path     = _from_eo(eo, "weight_local_path")
+
+    surrogate_model  = _normalize_surrogate_model(surrogate_model_raw)
+    surrogate_params = _normalize_surrogate_params(surrogate_params_raw)
+
+    opt_method = str(opt_method_raw).lower() if opt_method_raw else None
+    # 허용 메서드(예시): coordinate | nelder-mead | powell | lbfgsb | tnc | slsqp | cobyla | trust-constr | de | anneal | auto
+    allowed = {None, "coordinate", "nelder-mead", "powell", "lbfgsb", "tnc", "slsqp", "cobyla", "trust-constr", "de", "anneal", "auto"}
+    if opt_method not in allowed:
+        # 알 수 없는 값이면 그대로 넘겨도 되지만, 실수를 줄이려면 None 처리
+        print(f"[AUTOCTRL][warn] unknown opt_method={opt_method!r}; passing through (downstream may handle).")
+
+    try:
+        maxiter = int(maxiter_raw) if maxiter_raw is not None else None
+    except Exception:
+        raise HTTPException(status_code=400, detail="maxiter must be int")
+
+    print(f"[AUTOCTRL] Using surrogate_model={surrogate_model!r}, opt_method={opt_method!r}, "
+          f"maxiter={maxiter}, agent_base_url={agent_base_url!r}, weight_local_path={weight_local_path!r}")
+
+    # ---------- call runner ----------
     res = ac_run_direct(
         body,
         surrogate_model=surrogate_model,
@@ -511,10 +699,11 @@ def orchestration_assign(task_id: str, req: OrchestrationAssignRequest = Body(..
         maxiter=maxiter,
         agent_base_url=agent_base_url,
         agent_task_id=agent_task_id,
-        agent_inline=agent_inline,
+        agent_inline=bool(agent_inline),
         weight_local_path=weight_local_path,
     )
 
+    # ---------- NL answer ----------
     nl_answer = None
     try:
         nl_answer = (res.metadata or {}).get("nl_answer")
@@ -549,6 +738,7 @@ def orchestration_assign(task_id: str, req: OrchestrationAssignRequest = Body(..
         }
     )
     return payload
+
 
     
 if __name__ == "__main__":

@@ -43,18 +43,26 @@ def train_simple_linear(
     w_full = np.linalg.pinv(Xb) @ y
     w = w_full[:-1]
     b = float(w_full[-1])
+    y_hat_train = (X @ w) + b
+    mse = float(((y - y_hat_train) ** 2).mean())
+    # R^2 수식: 1 - SSE/SST (SST가 0이면 0으로)
+    sst = float(((y - y.mean()) ** 2).sum())
+    r2 = float(1.0 - float(((y - y_hat_train) ** 2).sum()) / sst) if sst > 0 else 0.0
 
     model = {
         "kind": LINEAR_KIND,
         "target_col": target_col,
         "feature_names": x_cols,
         "weights": w.astype(float),
-        "bias": b
+        "bias": b,
+        "train_metrics": {"mse": mse, "r2": r2}  # <-- 여기
     }
     return model
 
 def save_linear_model(model: Dict[str, Any], save_path: pathlib.Path) -> pathlib.Path:
     save_path = pathlib.Path(save_path).with_suffix(".npz")
+    # dict는 JSON으로 저장
+    import json
     np.savez(
         save_path,
         kind=np.array(model["kind"]),
@@ -62,10 +70,12 @@ def save_linear_model(model: Dict[str, Any], save_path: pathlib.Path) -> pathlib
         feature_names=np.array(model["feature_names"], dtype=object),
         weights=model["weights"],
         bias=np.array(model["bias"]),
+        train_metrics=np.array(json.dumps(model.get("train_metrics", {})))  # <-- ADD
     )
     return save_path.resolve()
 
 def load_linear_model(path: pathlib.Path) -> Dict[str, Any]:
+    import json
     path = pathlib.Path(path)
     with np.load(path, allow_pickle=True) as npz:
         kind = str(npz["kind"])
@@ -78,6 +88,12 @@ def load_linear_model(path: pathlib.Path) -> Dict[str, Any]:
             "weights": npz["weights"].astype(float),
             "bias": float(npz["bias"]),
         }
+        # === ADD: restore metrics if present ===
+        if "train_metrics" in npz:
+            try:
+                model["train_metrics"] = json.loads(str(npz["train_metrics"]))
+            except Exception:
+                model["train_metrics"] = {}
     return model
 
 def make_expected_y_fn_from_linear(model: Dict[str, Any]):
@@ -183,6 +199,24 @@ def train_and_save_sklearn(
 
     est.fit(X, y)
 
+    # === ADD: train metrics on training set ===
+    try:
+        y_hat = est.predict(X)
+        # 분류면 확률/결정값이 아닌 label-pred로 대체
+        if problem_type == "classification" and hasattr(est, "predict"):
+            # 분류 정확도도 함께 계산(선택)
+            from sklearn.metrics import accuracy_score
+            acc = float(accuracy_score(y, y_hat))
+            train_metrics = {"acc": acc}
+        else:
+            from sklearn.metrics import mean_squared_error, r2_score
+            train_metrics = {
+                "mse": float(mean_squared_error(y, y_hat)),
+                "r2":  float(r2_score(y, y_hat))
+            }
+    except Exception:
+        train_metrics = {}
+
     meta = {
         "kind": "sklearn",
         "problem_type": problem_type,  # "regression" | "classification"
@@ -190,7 +224,9 @@ def train_and_save_sklearn(
         "feature_names": x_cols,
         "model_name": model_name,
         "params": params,
+        "train_metrics": train_metrics,  # <-- ADD
     }
+
     # 분류의 경우 클래스 정보/양성 클래스 결정
     if hasattr(est, "classes_"):
         classes = list(getattr(est, "classes_"))
@@ -212,58 +248,35 @@ def train_and_save_sklearn(
     _joblib_dump(payload, path)
     return path.resolve()
 
-def _make_expected_y_fn_from_sklearn(payload: Dict[str, Any]):
+def _make_expected_y_fn_from_sklearn(payload):
     est = payload["estimator"]
-    meta = payload["meta"]
-    x_cols: List[str] = meta["feature_names"]
-    problem_type: str = meta["problem_type"]
-    class_opt = meta.get("class_opt")
+    meta = payload.get("meta", {})
+    feat_names = meta.get("feature_names")  # 학습시 사용한 피처 순서 그대로
 
-    def expected_y_fn(
-        last_y: float,
-        delta_y: float,
-        adjustments: Dict[str, float],
-        horizon: int,
-        *,
-        feature_df: Optional[pd.DataFrame] = None,
-        target_col: Optional[str] = None
-    ) -> float:
-        if feature_df is None:
-            return float(fallback_predict_expected_y(last_y, delta_y, adjustments, horizon))
-        try:
-            base_row = feature_df.tail(1)[x_cols].iloc[0].to_dict()
-        except Exception:
-            return float(fallback_predict_expected_y(last_y, delta_y, adjustments, horizon))
+    def fn(last_y, delta_y, adjs, horizon, *, feature_df=None, target_col=None):
+        # 1) 베이스 벡터: feature_df 최신행에서 feat_names 순서대로 추출
+        if feature_df is None or feat_names is None:
+            # 안전장치: 조정값 합만 쓰는 휴리스틱으로 폴백(임시)
+            return float(last_y + sum(adjs.values()) * 0.6 * max(min(horizon/20.0,1.2),0.3) - 0.1*delta_y)
 
-        x_vec = np.array(
-            [[float(base_row.get(c, 0.0) + adjustments.get(c, 0.0)) for c in x_cols]],
-            dtype=float
-        )
+        base_row = feature_df.iloc[-1]  # 최신
+        x = []
+        for f in feat_names:
+            val = float(base_row.get(f, 0.0))
+            if f in adjs:
+                val += float(adjs[f])  # 조정 적용(절대값 덧셈)
+            x.append(val)
 
-        if problem_type == "regression":
-            y_hat = float(est.predict(x_vec).reshape(-1)[0])
-            return y_hat
+        # 2) (선택) 스케일러/전처리 있으면 여기서 적용
+        # ex) if "scaler" in meta: x = meta["scaler"].transform([x])[0]
 
-        if hasattr(est, "predict_proba"):
-            proba = est.predict_proba(x_vec)[0]
-            if class_opt is not None:
-                try:
-                    idx = list(est.classes_).index(class_opt)
-                    return float(proba[idx])
-                except Exception:
-                    pass
-            return float(np.max(proba))
-        # prob이 없을 때: decision_function -> 시그모이드 근사
-        if hasattr(est, "decision_function"):
-            score = float(est.decision_function(x_vec).reshape(-1)[0])
-            return float(1.0 / (1.0 + np.exp(-score)))
-        y_pred = est.predict(x_vec).reshape(-1)[0]
-        try:
-            return float(y_pred)
-        except Exception:
-            return 1.0 if str(y_pred) == str(class_opt) else 0.0
+        # 3) 예측
+        yhat = est.predict([x])[0]
+        # (선택) 역변환/meta 후처리 있으면 여기서 적용
 
-    return expected_y_fn
+        return float(yhat)
+
+    return fn
 
 def load_surrogate(weight_local_path: Optional[str]):
     def fallback_fn(last_y, delta_y, adjustments, horizon, **kwargs) -> float:
@@ -291,3 +304,43 @@ def load_surrogate(weight_local_path: Optional[str]):
             pass
 
     return fallback_fn
+def debug_check_roundtrip(weight_local_path: str,
+                          df: pd.DataFrame,
+                          feature_names: List[str],
+                          target_col: str,
+                          horizon: int = 1) -> Dict[str, Any]:
+    """
+    저장된 모델을 load_surrogate로 불러 expected_y_fn을 만들고,
+    몇 가지 adjustments에 대해 예측이 잘 나오는지 점검한다.
+    또한 저장물에 내장된 train_metrics(있다면)도 리턴한다.
+    """
+    exp_fn = load_surrogate(weight_local_path)
+
+    # baseline & 간단한 변화 테스트
+    last_y = float(df[target_col].iloc[-1])
+    delta_y = float(df[target_col].iloc[-1] - df[target_col].iloc[-2]) if len(df) >= 2 else 0.0
+
+    def _pred(adj):
+        return float(exp_fn(last_y, delta_y, adj, horizon, feature_df=df, target_col=target_col))
+
+    zero = {f: 0.0 for f in feature_names}
+    one_up = {feature_names[0]: 1.0, **{f: 0.0 for f in feature_names[1:]}}
+    res = {
+        "predict_zero": _pred(zero),
+        "predict_first_feature_plus1": _pred(one_up),
+    }
+
+    # 저장 파일 내부 metrics(가능한 경우)도 같이 추출
+    try:
+        p = pathlib.Path(weight_local_path)
+        if p.suffix.lower() == ".npz":
+            m = load_linear_model(p)
+            res["train_metrics"] = m.get("train_metrics")
+        elif p.suffix.lower() in {".joblib", ".pkl"} and _HAS_JOBLIB:
+            payload = _joblib_load(p)
+            tm = (payload.get("meta") or {}).get("train_metrics")
+            res["train_metrics"] = tm
+    except Exception:
+        pass
+
+    return res
