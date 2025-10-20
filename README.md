@@ -1,7 +1,7 @@
 # PRISM-AutoControl: 자율제어 AI 에이전트
 
 `PRISM-AutoControl`은 [PRISM-AGI](../README.md) 플랫폼의 자율제어를 담당하는 AI 에이전트입니다. 예측된 결과를 바탕으로 최적의 제어 액션을 스스로 결정하고 실행합니다.
-
+commit잘되나
 ## 1. 주요 기능
 
 ### 대체 모델 근사 시스템
