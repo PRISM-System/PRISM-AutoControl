@@ -1,0 +1,30 @@
+services:
+  prism-autocontrol:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: prism-autocontrol
+    ports:
+      - "8006:8005"
+    networks:
+      - prism-shared-network
+    environment:
+      - PORT=8005
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # 데이터 및 출력 디렉토리 마운트 (선택사항)
+      - ./autocontrol/data:/app/autocontrol/data
+      - ./outputs:/app/outputs
+      # .env 파일이 있다면 마운트
+      - ./.env:/app/.env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  prism-shared-network:
+    external: true
