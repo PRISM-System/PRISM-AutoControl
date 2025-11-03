@@ -42,7 +42,7 @@ def run_autocontrol(
     # --- 컬럼 매핑 ---
     dataset_columns = list(input_data.drop('TIMESTAMP', axis=1).columns)
     extracted_X, extracted_y, mapping_score = extract_features_from_query(X, y, dataset_columns)
-    extracted_X = [mv for mv in extracted_X if mv is not None]
+    extracted_X = [mv for mv in extracted_X if (mv is not None) and (mv not in extracted_y)]
     if extracted_y is None:
         raise ValueError("Target column could not be mapped from query.")
 
@@ -146,15 +146,15 @@ def run_autocontrol(
     
     summary_prompt = (
         f"{query}가 현재 상황과 문제를 정의한 것이니 핵심만 정리해서 말하고,"
-        f"{df_future.head(1).to_dict()} 중에서 {extracted_X} 변수에 대해서 조금 풀어서 써주고,"
-        f"{df_future.head(1).to_dict()} 중에서 {extracted_y} 변수가 최종 최적화 결과이니 해당 값으로 제어되었다는 말로 정리해줘."
+        f"{df_future.head(1).to_dict()} 중에서 {extracted_X} 변수에 대해서 조금 풀어서 최대한 짧게 써주고,"
+        f"{df_future.head(1).to_dict()} 중에서 {extracted_y} 변수가 최종 최적화 결과이니 해당 값으로 제어되었다는 말로 한 줄로 정리해줘."
     )
     summary = llm.narrate(summary_prompt)
     # 호출측(FastAPI)이 그대로 넣어 쓸 수 있게 dict로 반환
     return {
         "nl_answer": nl_answer,
         "result_csv_path": result_csv_path,
-        "candidates": df_future.head(1).to_dict(),                # 필요 시 채워 넣기
+        "candidates": df_future.head(1).to_dict(),               # 필요 시 채워 넣기
         "selected_candidate_idx": None,  # 필요 시 채워 넣기
         "extracted_X": extracted_X,
         "extracted_y": extracted_y,
@@ -165,6 +165,7 @@ def run_autocontrol(
         "pred_steps": pred_steps,
         "ctrl_steps": ctrl_steps,
         "summary": summary,
+        "sample_data": df_future.head(1).to_dict(orient="records")
     }
 
 
