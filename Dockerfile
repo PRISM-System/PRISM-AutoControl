@@ -25,15 +25,15 @@ COPY . .
 RUN mkdir -p outputs/autocontrol outputs/weights
 
 # 포트 노출
-EXPOSE 8005
+EXPOSE 8500
 
 # 환경 변수 설정
-ENV PORT=8005
+ENV PORT=8500
 ENV PYTHONUNBUFFERED=1
 
 # 헬스체크 추가
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8005/ || exit 1
+    CMD curl -f http://localhost:8500/ || exit 1
 
 # uvicorn을 사용하여 FastAPI 애플리케이션 실행
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8005"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8500"]

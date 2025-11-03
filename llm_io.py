@@ -5,64 +5,56 @@ import json
 
 class LLMBridge:
     def __init__(self,
-                 base_url: str = "https://grnd.bimatrix.co.kr/django/agi",
-                 username: str | None = None,
-                 password: str | None = None,
+                 base_url: str = "http://localhost:8000",
+                 agent_name: str | None = "autonomous_control_agent",
                  timeout: float = 30.0,
                  verify: bool = False):
         self.base_url = base_url.rstrip("/")
-        self.login_url = f"{self.base_url}/api/login/"
-        self.llm_url = f"{self.base_url}/llm-agent/"
-        self.username = username or os.getenv("BIMATRIX_ID", "")
-        self.password = password or os.getenv("BIMATRIX_PW", "")
+        # Prism-Core agent invoke endpoint
+        self.agent_name = agent_name or os.getenv("PRISM_AGENT_NAME", "autonomous_control_agent")
+        self.invoke_url = f"{self.base_url}/api/agents/{self.agent_name}/invoke"
         self.timeout = timeout
         self.verify = verify
 
         self.session = requests.Session()
         self.user_id = None 
 
-    def login(self) -> dict:
-        payload = {"username": self.username, "password": self.password}
-        headers = {"accept": "application/json"}
-
-        resp = self.session.post(
-            self.login_url, json=payload, headers=headers,
-            timeout=self.timeout, verify=self.verify
-        )
-        resp.raise_for_status()
-
-        data = resp.json()
-        print(f"로그인 성공: {data}")
-        self.user_id = data.get("user_id")
-        return data
+    # Login is not required for Prism-Core agent invocation; removed.
 
     def chat(self,
              prompt: str,
-             system_prompt: str = "너는 산업 제어 및 공정 최적화 분야의 분석 전문가야. 제어 변수, 타겟 변수, 그로 인한 제어 결과 등의 여러 제어 후보군을 전달해주면 그걸 공정 특성을 고려하여 각각의 결과를 분석해주고, 최종적인 후보를 선정해주면 돼.",
-             model: str = "/root/models/openai/gpt-oss-120b",
+             system_prompt: str = "너는 산업 제어 및 공정 최적화 분야의 분석 전문가야.",
+             model: str = "",
              temperature: float = 0.7,
-             max_tokens: int = 10000,
+             max_tokens: int = 2048,
              top_p: float = 1.0,
              stream: bool = False) -> str:
         headers = {
             "accept": "application/json",
             "Content-Type": "application/json"
         }
+        # Prism-Core invoke payload
         payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
+            "prompt": prompt,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "top_p": top_p,
-            "stream": stream
+            "stop": None,
+            "use_tools": False,
+            "max_tool_calls": 0,
+            "extra_body": {
+                "chat_template_kwargs": {"enable_thinking": False},
+                # Optionally forward messages context if needed by server
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ]
+            }
         }
         resp = self.session.post(
-            self.llm_url,
+            self.invoke_url,
             json=payload,
             headers=headers,
+            timeout=self.timeout,
             verify=self.verify
         )
         try:
@@ -73,7 +65,8 @@ class LLMBridge:
 
         data = resp.json()
         try:
-            return data["choices"][0]["message"]["content"]
+            # Prism-Core invoke response shape: { text, tools_used, tool_results, metadata }
+            return data.get("text", json.dumps(data, ensure_ascii=False))
         except Exception:
             return json.dumps(data, ensure_ascii=False, indent=2)
 
@@ -82,12 +75,10 @@ class LLMBridge:
 
 if __name__ == "__main__":
     llm = LLMBridge(
-        username="kaist",
-        password="kaist1234",
+        base_url=os.getenv("PRISM_CORE_BASE_URL", "http://localhost:8000"),
+        agent_name=os.getenv("PRISM_AGENT_NAME", "autonomous_control_agent"),
         verify=False
     )
-
-    llm.login()
 
     prompt = "배고픈데 저녁 메뉴 추천해줘"
     response = llm.narrate(prompt)
