@@ -26,21 +26,21 @@
     "file_path": "test_data/semiconductor/semiconductor_cmp_001.csv",
     "columns": [
       "TIMESTAMP",
-      "TOOL_ID",
+      "SENSOR_ID",
       "MOTOR_CURRENT",
-      "HEAD_ROTATION",
       "SLURRY_FLOW_RATE",
+      "HEAD_ROTATION",
       "PRESSURE",
       "TEMPERATURE",
-      "DOWN_FORCE",
-      "PAD_CONDITION",
-      "REMOVAL_RATE",
-      "UNIFORMITY"
+      "POLISH_TIME",
+      "PAD_THICKNESS",
+      "SLURRY_TEMP",
+      "VIBRATION"
     ],
     "key_variables": [
       "SLURRY_FLOW_RATE",
       "MOTOR_CURRENT",
-      "REMOVAL_RATE"
+      "TEMPERATURE"
     ],
     "time_range": {
       "start": "2025-05-01T00:00:00Z",
@@ -95,7 +95,22 @@
       "api_endpoint": "POST /api/v1/workflow/start",
       "request": {
         "taskId": "CMP_TASK_20250501_001",
-        "query": "CMP 툴 TOOL_CMP01~CMP04의 SLURRY_FLOW_RATE 이상 감지 및 현재 상태 분석. 시간 범위: 2025-05-01T00:00:00Z ~ 2025-05-01T13:50:00Z. 주요 변수: SLURRY_FLOW_RATE, MOTOR_CURRENT, REMOVAL_RATE"
+        "query": "CMP 센서 SENSOR_ID의 SLURRY_FLOW_RATE 이상 감지 및 현재 상태 분석. 시간 범위: 2025-05-01T00:00:00Z ~ 2025-05-01T13:50:00Z. 주요 변수: SLURRY_FLOW_RATE, MOTOR_CURRENT, TEMPERATURE",
+        "timeseries_info": {
+          "timestamp": {
+            "start": "2025-05-01T00:00:00Z",
+            "end": "2025-05-01T13:50:00Z"
+          },
+          "process": "CMP",
+          "target_variable": "SLURRY_FLOW_RATE",
+          "source_variables": [
+            "SLURRY_FLOW_RATE",
+            "MOTOR_CURRENT",
+            "TEMPERATURE",
+            "PRESSURE",
+            "HEAD_ROTATION"
+          ]
+        }
       }
     },
     "step_3_monitoring_to_orchestration": {
@@ -104,7 +119,13 @@
       "timestamp": "2025-05-01T13:50:05Z",
       "api_endpoint": "POST /api/v1/workflow/start (response)",
       "response": {
-        "result": "### CMP Slurry 유량 이상 탐지 분석 결과\n\n---\n\n#### 📊 1. 탐지 결과 개요\n- **분석 대상**: CMP 툴 TOOL_CMP01~CMP04\n- **분석 시간**: 2025-05-01 00:00:00 ~ 13:50:00 (13시간 50분)\n- **총 데이터 포인트**: 4,980건\n- **이상치 감지**: 178건 (3.6%)\n- **이상 감지 시작 시간**: 2025-05-01T13:10:00Z\n\n#### ⚠️ 2. 주요 이상 사항\n\n##### 2.1 SLURRY_FLOW_RATE 불안정\n- **현상**: 간헐적 급감(intermittent drop) 패턴 감지\n- **정상 범위**: 180-220 mL/min\n- **현재 평균값**: 165.3 mL/min (목표 대비 -17.4%)\n- **최저값**: 132.8 mL/min (13:35 발생)\n- **변동 폭**: ±38.5 mL/min\n- **표준편차**: 28.7 mL/min (정상 대비 380% 증가)\n- **드롭 발생 빈도**: 평균 5분마다 1회\n- **추세**: 불안정(unstable with drops)\n\n##### 2.2 REMOVAL_RATE 저하\n- **정상 범위**: 250-300 nm/min\n- **현재 평균**: 218.5 nm/min (목표 대비 -20.5%)\n- **SLURRY_FLOW_RATE와 상관계수**: 0.88 (매우 강한 양의 상관관계)\n- **해석**: Slurry 공급 부족으로 연마율 저하\n- **불량 웨이퍼**: 34장 (13:10 이후)\n\n##### 2.3 UNIFORMITY 악화\n- **정상 범위**: ≥ 95%\n- **현재 평균**: 87.2% (목표 대비 -7.8%p)\n- **최악값**: 79.3% (13:35 발생)\n- **해석**: 불균일한 Slurry 공급으로 웨이퍼 면내 불균일 발생\n\n##### 2.4 MOTOR_CURRENT 스파이크\n- **정상 범위**: 8.5-10.5 A\n- **이상 패턴**: 간헐적 스파이크 (최대 13.2 A)\n- **스파이크 발생**: Slurry 드롭과 동시 발생\n- **해석**: Slurry 부족으로 패드-웨이퍼 마찰 증가\n\n#### 🔍 3. 근본 원인 분석\n\n**주요 원인 후보**:\n1. **Slurry 공급 펌프 불량** (가능성: 매우 높음)\n   - 간헐적 드롭 패턴\n   - 5분 주기 반복 (펌프 내부 기계적 문제 의심)\n   - 펌프 캐비테이션 또는 체크 밸브 고장 가능\n   \n2. **Slurry 라인 막힘** (가능성: 높음)\n   - Slurry 응고 또는 입자 침전\n   - 필터 막힘\n   - 라인 내 기포 유입\n   \n3. **Slurry 저장 탱크 레벨 저하** (가능성: 중간)\n   - 탱크 레벨 센서 오류 가능\n   - 실제 Slurry 부족\n\n#### 📈 4. 통계 분석 상세\n\n| 변수 | 정상 평균 | 현재 평균 | 최소값 | 최대값 | 목표 범위 | 이탈율 |\n|------|----------|----------|--------|--------|-----------|--------|\n| SLURRY_FLOW_RATE | 200 mL/min | 165.3 mL/min | 132.8 mL/min | 198.5 mL/min | 180-220 mL/min | 17.4% |\n| REMOVAL_RATE | 275 nm/min | 218.5 nm/min | 185.2 nm/min | 267.3 nm/min | 250-300 nm/min | 20.5% |\n| UNIFORMITY | 96.8% | 87.2% | 79.3% | 94.5% | ≥95% | 9.9% |\n| MOTOR_CURRENT | 9.5 A | 10.8 A | 9.1 A | 13.2 A | 8.5-10.5 A | 13.3% |\n\n#### 💡 5. 권장 조치사항\n\n**즉시 조치 (우선순위: 긴급)**\n1. Slurry 공급 펌프 점검\n   - 펌프 압력 게이지 확인\n   - 펌프 모터 진동 측정\n   - 체크 밸브 동작 확인\n   \n2. Slurry 라인 점검\n   - 필터 압력차 측정\n   - 라인 플러싱 수행\n   - 기포 유입 여부 확인\n\n**단기 조치 (2시간 내)**\n3. Slurry 저장 탱크 확인\n   - 레벨 센서 교정\n   - 실제 Slurry 잔량 육안 확인\n   - 필요시 Slurry 보충\n\n4. 불량 웨이퍼 처리\n   - 13:10 이후 가공 웨이퍼 34장 재검사\n   - UNIFORMITY < 90% 웨이퍼 재가공 또는 폐기\n\n**중기 조치 (24시간 내)**\n5. 예방 정비 스케줄 조정\n   - Slurry 공급 시스템 전체 점검\n   - 펌프 교체 검토\n   - 필터 교체 주기 단축\n\n#### 📌 6. 영향 범위 및 리스크\n\n- **생산 영향**: 중간 (34장 웨이퍼 불량, 재가공 필요)\n- **품질 영향**: 높음 (UNIFORMITY 저하, 칩 성능 편차 우려)\n- **수율 영향**: 웨이퍼당 양품 칩 수 약 15% 감소 예상\n- **경제적 손실**: 약 28,000,000원 (웨이퍼 34장 × 820,000원/장)\n- **고객 불만 가능성**: 중간 (품질 불량 지속 시)\n\n#### 🎯 7. 성능 지표 요약\n\n**정상 상태 (13:10 이전)**:\n- SLURRY_FLOW_RATE: 200.3 mL/min (안정)\n- REMOVAL_RATE: 276.8 nm/min (목표 달성)\n- UNIFORMITY: 96.8% (우수)\n- 불량률: 0.2%\n\n**이상 상태 (13:10 이후)**:\n- SLURRY_FLOW_RATE: 165.3 mL/min (17.4% 저하)\n- REMOVAL_RATE: 218.5 nm/min (20.5% 저하)\n- UNIFORMITY: 87.2% (9.9%p 저하)\n- 불량률: 42.5% (178배 증가)\n\n---\n**분석 완료 시각**: 2025-05-01T13:50:05Z  \n**분석 소요 시간**: 4.5초  \n**신뢰도**: 91%"
+        "summary": "Slurry 유량이 13:50부터 급격히 상승하여 최대 370.5 mL/min까지 스파이크가 발생하고 있습니다(정상 범위 240-260 mL/min). 3분간 20건의 이상치가 감지되었으며, 정상 대비 47% 초과된 유량으로 웨이퍼 표면 손상 및 과연마 위험이 있습니다. Slurry 공급 펌프의 압력 제어 불량 또는 유량 제어 밸브 오작동이 주요 원인으로 추정되며, 즉시 펌프 및 제어 시스템 점검이 필요합니다.",
+        "monitored_timeseries": {
+          "format": "csv",
+          "description": "2025-05-01 13:10~13:53 기간 동안의 Slurry 유량 및 관련 변수 모니터링 결과 (10초 간격)",
+          "sample_data": "TIMESTAMP,SLURRY_FLOW_RATE,MOTOR_CURRENT,TEMPERATURE,PRESSURE,HEAD_ROTATION\n2025-05-01T13:10:00Z,248.2,16.45,24.98,3.14,119.5\n2025-05-01T13:20:00Z,250.5,16.52,25.02,3.16,120.1\n2025-05-01T13:30:00Z,252.1,16.48,25.01,3.15,119.8\n2025-05-01T13:40:00Z,249.8,16.51,24.99,3.14,120.2\n2025-05-01T13:50:00Z,284.5,16.55,25.05,3.17,120.3\n2025-05-01T13:51:00Z,325.3,16.62,25.12,3.18,120.5\n2025-05-01T13:52:00Z,358.7,16.68,25.18,3.19,120.8\n2025-05-01T13:53:00Z,370.5,16.71,25.22,3.20,121.0"
+        },
+        "result": "### CMP Slurry 유량 이상 탐지 분석 결과\n\n---\n\n#### 📊 1. 탐지 결과 개요\n- **분석 대상**: CMP 툴 TOOL_CMP01~CMP04\n- **분석 시간**: 2025-05-01 00:00:00 ~ 13:50:00 (13시간 50분)\n- **총 데이터 포인트**: 4,980건\n- **이상치 감지**: 178건 (3.6%)\n- **이상 감지 시작 시간**: 2025-05-01T13:10:00Z\n\n#### ⚠️ 2. 주요 이상 사항\n\n##### 2.1 SLURRY_FLOW_RATE 불안정\n- **현상**: 간헐적 급등(intermittent spike) 패턴 감지\n- **정상 범위**: 240-260 mL/min\n- **현재 평균값**: 250.3 mL/min (평균은 정상 범위 내)\n- **최고값**: 370.5 mL/min (13:53 발생, 목표 대비 +47%)\n- **변동 폭**: ±120 mL/min\n- **표준편차**: 5.3 mL/min (정상 2.5 대비)\n- **스파이크 발생 빈도**: 평균 5분마다 1회\n- **추세**: 불안정(unstable with spikes)\n\n##### 2.2 REMOVAL_RATE 변동\n- **정상 범위**: 250-300 nm/min\n- **현재 평균**: 250.2 nm/min (정상 범위 내)\n- **SLURRY_FLOW_RATE와 상관계수**: 0.88 (매우 강한 양의 상관관계)\n- **해석**: Slurry 유량 스파이크 시 일시적 과연마 발생\n- **불량 웨이퍼**: 34장 (13:10 이후)\n\n##### 2.3 UNIFORMITY 악화\n- **정상 범위**: ≥ 95%\n- **현재 평균**: 87.2% (목표 대비 -7.8%p)\n- **최악값**: 79.3% (13:35 발생)\n- **해석**: 불균일한 Slurry 공급으로 웨이퍼 면내 불균일 발생\n\n##### 2.4 MOTOR_CURRENT 미세 변동\n- **정상 범위**: 16.0-16.6 A\n- **실제 범위**: 16.14-16.85 A\n- **평균값**: 16.50 A (정상 범위 내)\n- **해석**: Slurry 유량 스파이크 시 패드-웨이퍼 접촉 압력 미세 증가\n\n#### 🔍 3. 근본 원인 분석\n\n**주요 원인 후보**:\n1. **Slurry 공급 펌프 불량** (가능성: 매우 높음)\n   - 간헐적 스파이크 패턴\n   - 5분 주기 반복 (펌프 내부 기계적 문제 의심)\n   - 펌프 캐비테이션 또는 체크 밸브 고장 가능\n   \n2. **유량 제어 밸브 오작동** (가능성: 높음)\n   - 밸브 개도 제어 불량\n   - 제어 신호 노이즈\n   - 액추에이터 동작 지연\n   \n3. **압력 센서 이상** (가능성: 중간)\n   - 압력 센서 드리프트\n   - 센서 캘리브레이션 불량\n\n#### 📈 4. 통계 분석 상세\n\n| 변수 | 정상 평균 | 현재 평균 | 최소값 | 최대값 | 목표 범위 | 이탈율 |\n|------|----------|----------|--------|--------|-----------|--------|\n| SLURRY_FLOW_RATE | 250 mL/min | 250.3 mL/min | 238.95 mL/min | 370.54 mL/min | 240-260 mL/min | 42.5% |\n| REMOVAL_RATE | 275 nm/min | 218.5 nm/min | 185.2 nm/min | 267.3 nm/min | 250-300 nm/min | 20.5% |\n| UNIFORMITY | 96.8% | 87.2% | 79.3% | 94.5% | ≥95% | 9.9% |\n| MOTOR_CURRENT | 16.5 A | 16.50 A | 16.14 A | 16.85 A | 16.0-16.6 A | 4.3% |\n\n#### 💡 5. 권장 조치사항\n\n**즉시 조치 (우선순위: 긴급)**\n1. Slurry 공급 펌프 점검\n   - 펌프 압력 게이지 확인\n   - 펌프 모터 진동 측정\n   - 체크 밸브 동작 확인\n   \n2. Slurry 라인 점검\n   - 필터 압력차 측정\n   - 라인 플러싱 수행\n   - 기포 유입 여부 확인\n\n**단기 조치 (2시간 내)**\n3. Slurry 저장 탱크 확인\n   - 레벨 센서 교정\n   - 실제 Slurry 잔량 육안 확인\n   - 필요시 Slurry 보충\n\n4. 불량 웨이퍼 처리\n   - 13:10 이후 가공 웨이퍼 34장 재검사\n   - UNIFORMITY < 90% 웨이퍼 재가공 또는 폐기\n\n**중기 조치 (24시간 내)**\n5. 예방 정비 스케줄 조정\n   - Slurry 공급 시스템 전체 점검\n   - 펌프 교체 검토\n   - 필터 교체 주기 단축\n\n#### 📌 6. 영향 범위 및 리스크\n\n- **생산 영향**: 중간 (34장 웨이퍼 불량, 재가공 필요)\n- **품질 영향**: 높음 (UNIFORMITY 저하, 칩 성능 편차 우려)\n- **수율 영향**: 웨이퍼당 양품 칩 수 약 15% 감소 예상\n- **경제적 손실**: 약 28,000,000원 (웨이퍼 34장 × 820,000원/장)\n- **고객 불만 가능성**: 중간 (품질 불량 지속 시)\n\n#### 🎯 7. 성능 지표 요약\n\n**정상 상태 (13:10 이전)**:\n- SLURRY_FLOW_RATE: 250.3 mL/min (안정)\n- REMOVAL_RATE: 276.8 nm/min (목표 달성)\n- UNIFORMITY: 96.8% (우수)\n- 불량률: 0.2%\n\n**이상 상태 (13:10 이후)**:\n- SLURRY_FLOW_RATE: 평균 250.3 mL/min, 최대 370.5 mL/min (47% 스파이크)\n- REMOVAL_RATE: 218.5 nm/min (20.5% 저하)\n- UNIFORMITY: 87.2% (9.9%p 저하)\n- 불량률: 42.5% (178배 증가)\n\n---\n**분석 완료 시각**: 2025-05-01T13:50:05Z  \n**분석 소요 시간**: 4.5초  \n**신뢰도**: 91%"
       }
     },
     "step_4_orchestration_to_user": {
@@ -114,7 +135,7 @@
       "api_endpoint": "GET /api/v1/orchestrate (response)",
       "response": {
         "session_id": "cmp_session_20250501_001",
-        "final_answer": "CMP 공정의 Slurry 유량이 165.3 mL/min으로 목표 범위(180-220 mL/min) 대비 17.4% 저하되어 간헐적 드롭 패턴이 5분마다 발생하고 있습니다. 이로 인해 연마율이 20.5% 감소하고 웨이퍼 면내 균일도가 87.2%로 저하되었으며, 13:10 이후 34장의 웨이퍼가 불량 처리되었습니다. Slurry 공급 펌프의 기계적 문제(캐비테이션 또는 체크 밸브 고장)가 주요 원인으로 추정되며, 즉시 펌프 및 라인 점검이 필요합니다.",
+        "final_answer": "CMP 공정의 Slurry 유량이 평균 250.3 mL/min으로 정상이나 간헐적으로 370.5 mL/min까지 스파이크가 발생하고 있습니다. 이로 인해 연마율이 20.5% 감소하고 웨이퍼 면내 균일도가 87.2%로 저하되었으며, 13:10 이후 34장의 웨이퍼가 불량 처리되었습니다. Slurry 공급 펌프의 기계적 문제(캐비테이션 또는 체크 밸브 고장)가 주요 원인으로 추정되며, 즉시 펌프 및 라인 점검이 필요합니다.",
         "final_markdown": "### CMP Slurry 유량 이상 탐지 분석 결과\n\n(상세 내용은 monitoring response 참조)",
         "task_history": [
           {
@@ -143,12 +164,12 @@
     }
   },
   "expected_answer": {
-    "summary": "CMP 공정의 Slurry 유량이 13:10부터 불안정해져 평균 165.3 mL/min으로 목표 대비 17.4% 저하되었습니다. 5분 주기로 간헐적 드롭이 발생하며, 이로 인해 연마율 20.5% 감소, 균일도 87.2%로 저하, 34장 웨이퍼 불량이 발생했습니다. Slurry 공급 펌프의 기계적 문제가 주요 원인으로 추정됩니다.",
+    "summary": "CMP 공정의 Slurry 유량이 13:10부터 불안정해져 평균은 250.3 mL/min으로 정상이나 최대 370.5 mL/min까지 스파이크 발생되었습니다. 5분 주기로 간헐적 스파이크가 발생하며, 이로 인해 연마율 20.5% 감소, 균일도 87.2%로 저하, 34장 웨이퍼 불량이 발생했습니다. Slurry 공급 펌프의 기계적 문제가 주요 원인으로 추정됩니다.",
     "detected_issues": [
       {
-        "issue": "SLURRY_FLOW_RATE 간헐적 드롭",
+        "issue": "SLURRY_FLOW_RATE 간헐적 스파이크",
         "severity": "high",
-        "description": "165.3 mL/min으로 목표 범위(180-220 mL/min) 대비 17.4% 저하, 5분 주기 드롭 패턴",
+        "description": "370.5 mL/min으로 목표 범위(240-260 mL/min) 대비 47% 초과, 5분 주기 스파이크 패턴",
         "affected_timeframe": "2025-05-01T13:10:00Z ~ 2025-05-01T13:50:00Z",
         "occurrence_count": 178,
         "drop_frequency": "5분마다 1회"
@@ -156,7 +177,7 @@
       {
         "issue": "REMOVAL_RATE 저하",
         "severity": "high",
-        "description": "연마율 218.5 nm/min으로 20.5% 감소, Slurry 부족으로 인한 연마 성능 저하",
+        "description": "Slurry 유량 스파이크로 인한 일시적 과연마 발생",
         "impact": "웨이퍼당 양품 칩 수 15% 감소"
       },
       {
@@ -168,8 +189,8 @@
       {
         "issue": "MOTOR_CURRENT 스파이크",
         "severity": "medium",
-        "description": "Slurry 드롭과 동시에 전류 스파이크 발생 (최대 13.2 A)",
-        "root_cause_hint": "패드-웨이퍼 마찰 증가"
+        "description": "Slurry 스파이크와 동시에 전류 미세 증가 (최대 16.85 A)",
+        "root_cause_hint": "패드-웨이퍼 접촉 압력 미세 증가"
       }
     ],
     "recommendations": [
