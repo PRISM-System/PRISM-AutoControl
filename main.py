@@ -55,7 +55,7 @@ def run(body: AutoControlRunRequest = Body(...)):
 
 
 @app.put("/api/v1/task/{task_id}/autocontrol/assign", response_model=OrchestrationAssignResponse)
-def orchestration_assign(taskId: str, req: OrchestrationAssignRequest = Body(...)):
+def orchestration_assign(req: OrchestrationAssignRequest = Body(...)):
     out = run_autocontrol(
         # scenario_path=os.getenv("DEFAULT_SCENARIO_PATH", "scenarios/automotive/SCENARIO_11.json"),
         data_path=os.getenv("DEFAULT_DATA_PATH", "./test_data/semiconductor/semiconductor_deposition_003.csv"),
@@ -64,14 +64,16 @@ def orchestration_assign(taskId: str, req: OrchestrationAssignRequest = Body(...
         control_setpoint=req.control_setpoint,
         control_horizon_minutes=req.control_horizon_minutes,
         constraints=req.constraints,
+        query=req.query
     )
 
     payload = OrchestrationAssignResponse(
-        task_id=taskId,
+        task_id=req.taskId,
         updated_assignments=[UpdatedAssignment(agent_id="autocontrol", status="ready")],
         response={
             "autocontrol": {
-                "nl_answer": out["nl_answer"],                         # <- main의 response를 그대로
+                "summary": out["summary"],
+                "result": out["nl_answer"],                         # <- main의 response를 그대로
                 "result_csv_path": out["result_csv_path"],
                 "selected_candidate": {
                     "id": "cand_0",
