@@ -40,5 +40,6 @@ def extract_features_from_query(X: list, y: str, dataset_columns: list, threshol
 
     for k, v in mapping_results.items():
         print(f"{k:>20s} -> {v['matched_column']}  (score={v['score']:.3f})")
-
+    print(mapped_X)
+    print(mapped_y)
     return mapped_X, mapped_y, mapping_results
