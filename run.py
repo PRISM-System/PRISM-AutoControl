@@ -19,6 +19,7 @@ def run_autocontrol(
     control_setpoint: Optional[float] = None,
     control_horizon_minutes: Optional[float] = None,
     constraints: Optional[Dict[str, Dict[str, float]]] = None,
+    query: Optional[str] = None,
     optimization_objective: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -142,7 +143,13 @@ def run_autocontrol(
         f"후보들의 장점, 단점, 위험성, 기대 효과를 정리해줘."
     )
     nl_answer = llm.narrate(prompt)
-
+    
+    summary_prompt = (
+        f"{query}가 현재 상황과 문제를 정의한 것이니 핵심만 정리해서 말하고,"
+        f"{df_future.head(1).to_dict()} 중에서 {extracted_X} 변수에 대해서 조금 풀어서 써주고,"
+        f"{df_future.head(1).to_dict()} 중에서 {extracted_y} 변수가 최종 최적화 결과이니 해당 값으로 제어되었다는 말로 정리해줘."
+    )
+    summary = llm.narrate(summary_prompt)
     # 호출측(FastAPI)이 그대로 넣어 쓸 수 있게 dict로 반환
     return {
         "nl_answer": nl_answer,
@@ -157,16 +164,16 @@ def run_autocontrol(
         "u_bounds": u_bounds,
         "pred_steps": pred_steps,
         "ctrl_steps": ctrl_steps,
+        "summary": summary,
     }
 
 
 if __name__ == "__main__":
     # 로컬 실행(개발용): 기존 코드와 동일 동작
     scenario_path = "scenarios/automotive/SCENARIO_11.json"
-    data_path = "./test_data/automotive/automotive_press_003.csv"
+    data_path = "./test_data/semiconductor/semiconductor_deposition_003.csv"
 
     out = run_autocontrol(
-        scenario_path=scenario_path,
         data_path=data_path,
         feature_names=None,            # 시나리오에서 읽음
         target_col=None,               # 시나리오에서 읽음
