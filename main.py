@@ -55,12 +55,12 @@ def run(body: AutoControlRunRequest = Body(...)):
 
 
 @app.put("/api/v1/task/{task_id}/autocontrol/assign", response_model=OrchestrationAssignResponse)
-def orchestration_assign(task_id: str, req: OrchestrationAssignRequest = Body(...)):
+def orchestration_assign(taskId: str, req: OrchestrationAssignRequest = Body(...)):
     # spec 구성 (요청에서 필요한 값만)
     control = getattr(req, "control", None) or {}
     out = run_autocontrol(
-        scenario_path=os.getenv("DEFAULT_SCENARIO_PATH", "scenarios/automotive/SCENARIO_11.json"),
-        data_path=os.getenv("DEFAULT_DATA_PATH", "./test_data/automotive/automotive_press_003.csv"),
+        # scenario_path=os.getenv("DEFAULT_SCENARIO_PATH", "scenarios/automotive/SCENARIO_11.json"),
+        # data_path=os.getenv("DEFAULT_DATA_PATH", "./test_data/automotive/automotive_press_003.csv"),
         feature_names=getattr(req, "feature_names", None),
         target_col=getattr(req, "target_col", None),
         control_setpoint=control.get("setpoint"),
@@ -69,7 +69,7 @@ def orchestration_assign(task_id: str, req: OrchestrationAssignRequest = Body(..
     )
 
     payload = OrchestrationAssignResponse(
-        task_id=req.task_id or task_id,
+        task_id=req.task_id or taskId,
         updated_assignments=[UpdatedAssignment(agent_id="autocontrol", status="ready")],
         response={
             "autocontrol": {
