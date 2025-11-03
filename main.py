@@ -56,8 +56,6 @@ def run(body: AutoControlRunRequest = Body(...)):
 
 @app.put("/api/v1/task/{task_id}/autocontrol/assign", response_model=OrchestrationAssignResponse)
 def orchestration_assign(taskId: str, req: OrchestrationAssignRequest = Body(...)):
-    # spec 구성 (요청에서 필요한 값만)
-    control = getattr(req, "control", None) or {}
     out = run_autocontrol(
         # scenario_path=os.getenv("DEFAULT_SCENARIO_PATH", "scenarios/automotive/SCENARIO_11.json"),
         data_path=os.getenv("DEFAULT_DATA_PATH", "./test_data/semiconductor/semiconductor_deposition_003.csv"),
