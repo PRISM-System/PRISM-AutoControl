@@ -60,16 +60,16 @@ def orchestration_assign(taskId: str, req: OrchestrationAssignRequest = Body(...
     control = getattr(req, "control", None) or {}
     out = run_autocontrol(
         # scenario_path=os.getenv("DEFAULT_SCENARIO_PATH", "scenarios/automotive/SCENARIO_11.json"),
-        # data_path=os.getenv("DEFAULT_DATA_PATH", "./test_data/automotive/automotive_press_003.csv"),
-        feature_names=getattr(req, "feature_names", None),
-        target_col=getattr(req, "target_col", None),
-        control_setpoint=control.get("setpoint"),
-        control_horizon_minutes=control.get("horizon"),
-        constraints=getattr(req, "constraints", None),
+        data_path=os.getenv("DEFAULT_DATA_PATH", "./test_data/semiconductor/semiconductor_deposition_003.csv"),
+        feature_names=req.feature_names,
+        target_col=req.target_col,
+        control_setpoint=req.control_setpoint,
+        control_horizon_minutes=req.control_horizon_minutes,
+        constraints=req.constraints,
     )
 
     payload = OrchestrationAssignResponse(
-        task_id=req.task_id or taskId,
+        task_id=taskId,
         updated_assignments=[UpdatedAssignment(agent_id="autocontrol", status="ready")],
         response={
             "autocontrol": {
