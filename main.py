@@ -58,9 +58,9 @@ def run(body: AutoControlRunRequest = Body(...)):
 def orchestration_assign(req: OrchestrationAssignRequest = Body(...)):
     out = run_autocontrol(
         # scenario_path=os.getenv("DEFAULT_SCENARIO_PATH", "scenarios/automotive/SCENARIO_11.json"),
-        data_path=os.getenv("DEFAULT_DATA_PATH", "./test_data/semiconductor/semiconductor_deposition_003.csv"),
-        feature_names=req.feature_names,
-        target_col=req.target_col,
+        data_path=os.getenv("DEFAULT_DATA_PATH", "./test_data/semiconductor/semiconductor_full_004.csv"),
+        feature_names=req.timeseries_info["source_variables"],
+        target_col=req.timeseries_info["target_variable"],
         control_setpoint=req.control_setpoint,
         control_horizon_minutes=req.control_horizon_minutes,
         constraints=req.constraints,
@@ -74,13 +74,11 @@ def orchestration_assign(req: OrchestrationAssignRequest = Body(...)):
             "autocontrol": {
                 "summary": out["summary"],
                 "result": out["nl_answer"],                         # <- main의 response를 그대로
-                "result_csv_path": out["result_csv_path"],
-                "selected_candidate": {
-                    "id": "cand_0",
-                    "adjustments": {X: out["candidates"][X][0] for X in out["extracted_X"]} 
-                },
-                "expected_y": out["candidates"][out["extracted_y"]][0],
-                "score": 0.9
+                "controlled_timeseries": {
+                    "format": "csv",
+                    "description": f"제어 적용 후 제어 변수({out['extracted_X']})의 제어값과 목표 변수({out['extracted_y']})의 예측 값",
+                    "sample_data": out["sample_data"]
+                }
             }
         }
     )
