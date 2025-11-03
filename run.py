@@ -13,9 +13,7 @@ from optimization.utils import *
 from optimization.do_mpc import *
 
 def run_autocontrol(
-    scenario_path: str,
     data_path: str,
-    # 아래 6개는 보통 시나리오 JSON에서 오지만, 외부에서 덮어쓰기도 가능
     feature_names: Optional[List[str]] = None,
     target_col: Optional[str] = None,
     control_setpoint: Optional[float] = None,
@@ -28,23 +26,18 @@ def run_autocontrol(
     반환: {'nl_answer': str, 'result_csv_path': str, 'candidates': [], 'selected_candidate_idx': None, ...}
     """
     # --- 시나리오/데이터 로드 ---
-    scenario = load_scenario(scenario_path)
+    # scenario = load_scenario(scenario_path)
     input_data = pd.read_csv(data_path)
 
     # 샘플링 주기(초)
     dt = infer_dt_seconds(input_data)
-
-    # 시나리오에서 기본 파라미터 로드(외부 인자가 있으면 우선)
-    step6 = scenario.get('agent_workflow', {}).get('step_6_orchestration_to_autocontrol', {})
-    req6 = step6.get('request', {})
-
-    X = feature_names if feature_names is not None else req6.get('feature_names')
-    y = target_col if target_col is not None else req6.get('target_col')
-    target_setpoint = control_setpoint if control_setpoint is not None else req6.get('control_setpoint')
-    horizon_min = control_horizon_minutes if control_horizon_minutes is not None else req6.get('control_horizon_minutes')
-    X_constraints = constraints if constraints is not None else req6.get('constraints', {})
-    optimization_objective = optimization_objective or req6.get('optimization_objective')
-
+    
+    X = feature_names
+    y = target_col
+    target_setpoint = control_setpoint
+    horizon_min = control_horizon_minutes
+    X_constraints = constraints
+    
     # --- 컬럼 매핑 ---
     dataset_columns = list(input_data.drop('TIMESTAMP', axis=1).columns)
     extracted_X, extracted_y, mapping_score = extract_features_from_query(X, y, dataset_columns)
