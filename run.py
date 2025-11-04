@@ -129,8 +129,11 @@ def run_autocontrol(
     df_future.to_csv(result_csv_path, index=False)
 
     # --- LLM 설명 생성 ---
-    llm = LLMBridge(username="kaist", password="kaist1234", verify=False)
-    llm.login()
+    llm = LLMBridge(
+        base_url=os.getenv("PRISM_CORE_BASE_URL", "http://147.47.39.144:8000"),
+        agent_name="autonomous_control_agent",
+        verify=False
+    )
     prompt = (
         f"사용자가 입력한 제어 변수명은 {X}, 타겟 변수명은 {y}였어. "
         f"하지만 실제로 데이터에 그 변수는 없었고, 코사인 유사도 기반으론 제어 변수 명은 {extracted_X}, "
@@ -142,14 +145,14 @@ def run_autocontrol(
         f"최적화 결과 후보 일부: {df_future.head(5).to_dict()}. "
         f"후보들의 장점, 단점, 위험성, 기대 효과를 정리해줘."
     )
-    nl_answer = llm.narrate(prompt)
+    nl_answer = llm.chat(prompt)
     
     summary_prompt = (
         f"{query}가 현재 상황과 문제를 정의한 것이니 핵심만 정리해서 말하고,"
         f"{df_future.head(1).to_dict()} 중에서 {extracted_X} 변수에 대해서 조금 풀어서 최대한 짧게 써주고,"
         f"{df_future.head(1).to_dict()} 중에서 {extracted_y} 변수가 최종 최적화 결과이니 해당 값으로 제어되었다는 말로 한 줄로 정리해줘."
     )
-    summary = llm.narrate(summary_prompt)
+    summary = llm.chat(summary_prompt)
     # 호출측(FastAPI)이 그대로 넣어 쓸 수 있게 dict로 반환
     return {
         "nl_answer": nl_answer,

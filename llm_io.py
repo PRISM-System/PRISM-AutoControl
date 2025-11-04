@@ -12,7 +12,7 @@ class LLMBridge:
         self.base_url = base_url.rstrip("/")
         # Prism-Core agent invoke endpoint
         self.agent_name = agent_name or os.getenv("PRISM_AGENT_NAME", "autonomous_control_agent")
-        self.invoke_url = f"{self.base_url}/api/agents/{self.agent_name}/invoke"
+        self.invoke_url = f"{self.base_url}/core/api/agents/{self.agent_name}/invoke"
         self.timeout = timeout
         self.verify = verify
 
