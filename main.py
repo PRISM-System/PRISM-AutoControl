@@ -102,11 +102,38 @@ def run(body: AutoControlRunRequest = Body(...)):
 
 @app.put("/api/v1/task/{task_id}/autocontrol/assign", response_model=OrchestrationAssignResponse)
 def orchestration_assign(req: OrchestrationAssignRequest = Body(...)):
+    # timeseries_info가 None인 경우 기본값 사용
+    if req.timeseries_info is not None:
+        feature_names = req.timeseries_info.get("source_variables", req.feature_names)
+        target_col = req.timeseries_info.get("target_variable", req.target_col)
+    else:
+        feature_names = req.feature_names
+        target_col = req.target_col
+
+    # feature_names와 target_col이 모두 None인 경우 에러 메시지 반환
+    if feature_names is None or target_col is None:
+        logger.warning(f"❌ AutoControl 요청 실패: feature_names 또는 target_col이 제공되지 않았습니다.")
+        logger.warning(f"   feature_names: {feature_names}, target_col: {target_col}")
+        logger.warning(f"   query: {req.query}")
+
+        # 에러 응답 반환
+        return OrchestrationAssignResponse(
+            task_id=req.taskId,
+            updated_assignments=[UpdatedAssignment(agent_id="autocontrol", status="error")],
+            response={
+                "autocontrol": {
+                    "summary": "자동제어 에이전트 실행 실패",
+                    "result": "제어 대상 변수(feature_names) 또는 목표 변수(target_col)가 제공되지 않아 자동제어를 수행할 수 없습니다. Orchestrator에서 이러한 정보를 추출하여 전달해야 합니다.",
+                    "controlled_timeseries": None
+                }
+            }
+        )
+
     out = run_autocontrol(
         # scenario_path=os.getenv("DEFAULT_SCENARIO_PATH", "scenarios/automotive/SCENARIO_11.json"),
         data_path=os.getenv("DEFAULT_DATA_PATH", "./test_data/semiconductor/semiconductor_full_004.csv"),
-        feature_names=req.timeseries_info["source_variables"],
-        target_col=req.timeseries_info["target_variable"],
+        feature_names=feature_names,
+        target_col=target_col,
         control_setpoint=req.control_setpoint,
         control_horizon_minutes=req.control_horizon_minutes,
         constraints=req.constraints,

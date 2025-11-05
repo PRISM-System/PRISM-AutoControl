@@ -12,6 +12,11 @@ services:
       - PORT=8500
       - PYTHONUNBUFFERED=1
     volumes:
+      # Python 소스 파일 마운트 (hot reload)
+      - ./main.py:/app/main.py
+      - ./run.py:/app/run.py
+      - ./autocontrol:/app/autocontrol
+      - ./orchestra:/app/orchestra
       # 데이터 및 출력 디렉토리 마운트 (선택사항)
       - ./autocontrol/data:/app/autocontrol/data
       - ./outputs:/app/outputs
